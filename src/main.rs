@@ -1,11 +1,13 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod firmware;
+mod i18n;
 mod protocol;
 mod worker;
 
 use eframe::egui;
 use egui_plot::{Line, Plot};
+use i18n::{Language, Message};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -16,7 +18,8 @@ struct App {
     commands: Sender<Command>,
     events: Receiver<Event>,
     samples: VecDeque<TimedSample>,
-    status: String,
+    status: Message,
+    language: Language,
     connected: bool,
     bootloader: bool,
     flashing: bool,
@@ -38,7 +41,11 @@ impl App {
             commands: command_tx,
             events: event_rx,
             samples: VecDeque::new(),
-            status: "连接 UT70 侧面 HID 口后点击“连接”".into(),
+            status: Message::new(
+                "连接 UT70 侧面 HID 口后点击“连接”",
+                "Connect the UT70 side HID port, then select Connect",
+            ),
+            language: Language::Chinese,
             connected: false,
             bootloader: false,
             flashing: false,
@@ -61,11 +68,24 @@ impl App {
                     self.bootloader = false;
                     self.rate = rate;
                     self.status = if !rate_confirmed {
-                        format!("已连接，采样率查询未响应；暂按 {rate} SPS 解析，请手动设置")
+                        Message::new(
+                            format!("已连接，采样率查询未响应；暂按 {rate} SPS 解析，请手动设置"),
+                            format!(
+                                "Connected, but the sample rate query timed out. Using {rate} SPS until you set a rate."
+                            ),
+                        )
                     } else if version.is_some() {
-                        format!("已连接；采样率 {rate} SPS")
+                        Message::new(
+                            format!("已连接；采样率 {rate} SPS"),
+                            format!("Connected; sample rate {rate} SPS"),
+                        )
                     } else {
-                        format!("已连接；版本查询未响应，采样率已确认 {rate} SPS")
+                        Message::new(
+                            format!("已连接；版本查询未响应，采样率已确认 {rate} SPS"),
+                            format!(
+                                "Connected; version query timed out, sample rate confirmed at {rate} SPS"
+                            ),
+                        )
                     };
                     self.version = version;
                 }
@@ -73,16 +93,25 @@ impl App {
                     self.connected = false;
                     self.bootloader = true;
                     self.version = Some(version);
-                    self.status = "仪表处于升级模式，可选择本地 .atk 固件".into();
+                    self.status = Message::new(
+                        "仪表处于升级模式，可选择本地 .atk 固件",
+                        "The meter is in upgrade mode. Select a local .atk firmware file.",
+                    );
                 }
                 Event::Disconnected => self.connected = false,
                 Event::Rate(rate) => {
                     self.rate = rate;
-                    self.status = format!("采样率已设为 {rate} SPS");
+                    self.status = Message::new(
+                        format!("采样率已设为 {rate} SPS"),
+                        format!("Sample rate set to {rate} SPS"),
+                    );
                 }
                 Event::Screen(screen) => {
                     self.screen = screen;
-                    self.status = format!("设备报告的界面编号：{screen}");
+                    self.status = Message::new(
+                        format!("设备报告的界面编号：{screen}"),
+                        format!("Meter reports screen ID {screen}"),
+                    );
                 }
                 Event::Samples(batch) => {
                     self.samples.extend(batch);
@@ -104,8 +133,10 @@ impl App {
                     self.bootloader = false;
                     self.version = Some(version);
                     self.flash_confirmed = false;
-                    self.status =
-                        "烧录完成；设备已重启并通过应用版本校验。点击连接开始测量。".into();
+                    self.status = Message::new(
+                        "烧录完成；设备已重启并通过应用版本校验。点击连接开始测量。",
+                        "Flashing finished. The meter rebooted and its application version was verified. Select Connect to measure.",
+                    );
                 }
                 Event::Error(message) => {
                     self.flashing = false;
@@ -120,7 +151,7 @@ impl App {
     }
 
     fn chart_points(&self, pick: impl Fn(&protocol::Sample) -> f64) -> Vec<[f64; 2]> {
-        // Keep at most about 2000 points per plot without changing the CSV stream.
+        // 每张曲线最多绘制约 2000 个点；CSV 仍记录收到的全部测量点。
         let width = self.samples.len().div_ceil(1000).max(1);
         let values: Vec<_> = self.samples.iter().collect();
         let mut out = Vec::with_capacity(values.len().min(2000));
@@ -155,36 +186,65 @@ impl App {
 
     fn header(&mut self, ui: &mut egui::Ui) {
         ui.heading("ATK UT70");
-        ui.label(&self.status);
+        egui::ComboBox::from_label(self.language.pick("语言", "Language"))
+            .selected_text(match self.language {
+                Language::Chinese => "简体中文",
+                Language::English => "English",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.language, Language::Chinese, "简体中文");
+                ui.selectable_value(&mut self.language, Language::English, "English");
+            });
+        let lang = self.language;
+        ui.label(self.status.text(lang));
         if let Some(v) = &self.version {
-            ui.label(format!(
-                "{} · 硬件 {}.{} · 应用 V{}.{} · Boot {} · 序列号 {}",
-                if v.boot_mode {
-                    "升级模式"
-                } else {
-                    "应用模式"
-                },
-                v.hardware / 10,
-                v.hardware % 10,
-                v.application / 10,
-                v.application % 10,
-                v.bootloader,
-                v.serial
-            ));
+            ui.label(match lang {
+                Language::Chinese => format!(
+                    "{} · 硬件 {}.{} · 应用 V{}.{} · Boot {} · 序列号 {}",
+                    if v.boot_mode {
+                        "升级模式"
+                    } else {
+                        "应用模式"
+                    },
+                    v.hardware / 10,
+                    v.hardware % 10,
+                    v.application / 10,
+                    v.application % 10,
+                    v.bootloader,
+                    v.serial,
+                ),
+                Language::English => format!(
+                    "{} · Hardware {}.{} · App V{}.{} · Boot {} · Serial {}",
+                    if v.boot_mode {
+                        "Upgrade mode"
+                    } else {
+                        "Application mode"
+                    },
+                    v.hardware / 10,
+                    v.hardware % 10,
+                    v.application / 10,
+                    v.application % 10,
+                    v.bootloader,
+                    v.serial,
+                ),
+            });
         }
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(
                     !self.connected && !self.flashing,
-                    egui::Button::new("连接 / 检测模式"),
+                    egui::Button::new(lang.pick("连接 / 检测模式", "Connect / detect mode")),
                 )
                 .clicked()
             {
                 let _ = self.commands.send(Command::Connect);
-                self.status = "正在连接…".into();
+                self.status = Message::new("正在连接…", "Connecting…");
             }
             if ui
-                .add_enabled(self.connected && !self.flashing, egui::Button::new("断开"))
+                .add_enabled(
+                    self.connected && !self.flashing,
+                    egui::Button::new(lang.pick("断开", "Disconnect")),
+                )
                 .clicked()
             {
                 let _ = self.commands.send(Command::Disconnect);
@@ -192,7 +252,7 @@ impl App {
             if ui
                 .add_enabled(
                     self.connected && !self.recording,
-                    egui::Button::new("开始 CSV 记录"),
+                    egui::Button::new(lang.pick("开始 CSV 记录", "Start CSV recording")),
                 )
                 .clicked()
             {
@@ -204,7 +264,10 @@ impl App {
                 }
             }
             if ui
-                .add_enabled(self.recording, egui::Button::new("停止记录"))
+                .add_enabled(
+                    self.recording,
+                    egui::Button::new(lang.pick("停止记录", "Stop recording")),
+                )
                 .clicked()
             {
                 let _ = self.commands.send(Command::StopCsv);
@@ -213,7 +276,7 @@ impl App {
         ui.horizontal(|ui| {
             let mut selected_rate = self.rate;
             ui.add_enabled_ui(self.connected && !self.flashing && !self.recording, |ui| {
-                egui::ComboBox::from_label("采样率")
+                egui::ComboBox::from_label(lang.pick("采样率", "Sample rate"))
                     .selected_text(format!("{} SPS", self.rate))
                     .show_ui(ui, |ui| {
                         for rate in protocol::RATES {
@@ -226,17 +289,17 @@ impl App {
             }
             let mut selected_screen = self.screen;
             ui.add_enabled_ui(self.connected && !self.flashing && !self.recording, |ui| {
-                egui::ComboBox::from_label("仪表界面")
+                egui::ComboBox::from_label(lang.pick("仪表界面", "Meter screen"))
                     .selected_text(
                         protocol::SCREENS
                             .iter()
-                            .find(|(id, _)| *id == self.screen)
-                            .map(|(_, text)| *text)
-                            .unwrap_or("未知"),
+                            .find(|(id, _, _)| *id == self.screen)
+                            .map(|(_, zh, en)| lang.pick(zh, en))
+                            .unwrap_or(lang.pick("未知", "Unknown")),
                     )
                     .show_ui(ui, |ui| {
-                        for (id, name) in protocol::SCREENS {
-                            ui.selectable_value(&mut selected_screen, *id, *name);
+                        for (id, zh, en) in protocol::SCREENS {
+                            ui.selectable_value(&mut selected_screen, *id, lang.pick(zh, en));
                         }
                     });
             });
@@ -247,6 +310,7 @@ impl App {
     }
 
     fn plots(&self, ui: &mut egui::Ui) {
+        let lang = self.language;
         ui.separator();
         if let Some(s) = self.latest() {
             ui.horizontal(|ui| {
@@ -256,35 +320,51 @@ impl App {
                 ui.label(format!("D+ {:.4} V  D− {:.4} V", s.dp, s.dm));
             });
         } else {
-            ui.label("暂无测量数据");
+            ui.label(lang.pick("暂无测量数据", "No measurement data yet"));
         }
         Plot::new("voltage_plot")
             .height(220.0)
-            .x_axis_label("秒")
-            .y_axis_label("电压 V")
+            .x_axis_label(lang.pick("秒", "Seconds"))
+            .y_axis_label(lang.pick("电压 V", "Voltage V"))
             .show(ui, |plot| {
-                plot.line(Line::new("电压", self.chart_points(|s| s.voltage as f64)));
+                plot.line(Line::new(
+                    lang.pick("电压", "Voltage"),
+                    self.chart_points(|s| s.voltage as f64),
+                ));
             });
         Plot::new("current_plot")
             .height(220.0)
-            .x_axis_label("秒")
-            .y_axis_label("电流 A")
+            .x_axis_label(lang.pick("秒", "Seconds"))
+            .y_axis_label(lang.pick("电流 A", "Current A"))
             .show(ui, |plot| {
-                plot.line(Line::new("电流", self.chart_points(|s| s.current as f64)));
+                plot.line(Line::new(
+                    lang.pick("电流", "Current"),
+                    self.chart_points(|s| s.current as f64),
+                ));
             });
-        ui.small("曲线显示最近 60 秒，并限制绘图点数；CSV 记录全部收到的测量点。");
+        ui.small(lang.pick(
+            "曲线显示最近 60 秒，并限制绘图点数；CSV 记录全部收到的测量点。",
+            "Charts show the latest 60 seconds with limited drawing points; CSV stores every received sample.",
+        ));
     }
 
     fn flashing_controls(&mut self, ui: &mut egui::Ui) {
+        let lang = self.language;
         ui.separator();
-        ui.heading("本地固件升级");
-        ui.label("先拔下侧面 HID 线，按住仪表右键重新插入，使仪表进入升级模式。选择适配硬件版本的官方 .atk 文件。");
+        ui.heading(lang.pick("本地固件升级", "Local firmware upgrade"));
+        ui.label(lang.pick(
+            "先拔下侧面 HID 线，按住仪表右键重新插入，使仪表进入升级模式。选择适配硬件版本的官方 .atk 文件。",
+            "Unplug the side HID cable, hold the meter's right button while reconnecting it, then select an official .atk file for this hardware revision.",
+        ));
         if ui
-            .add_enabled(!self.flashing, egui::Button::new("选择 .atk 文件"))
+            .add_enabled(
+                !self.flashing,
+                egui::Button::new(lang.pick("选择 .atk 文件", "Select .atk file")),
+            )
             .clicked()
         {
             if let Some(path) = rfd::FileDialog::new()
-                .add_filter("ATK firmware", &["atk"])
+                .add_filter(lang.pick("ATK 固件", "ATK firmware"), &["atk"])
                 .pick_file()
             {
                 match firmware::Firmware::read(&path) {
@@ -294,37 +374,54 @@ impl App {
                     }
                     Err(e) => {
                         self.firmware = None;
-                        self.status = format!("固件文件无效：{e}");
+                        self.status = Message::new(
+                            format!("固件文件无效：{e}"),
+                            format!("Invalid firmware file: {e}"),
+                        );
                     }
                 }
             }
         }
         if let Some((path, info)) = &self.firmware {
             ui.label(path.display().to_string());
-            ui.label(format!(
-                "硬件 {}.{} · 目标应用 V{}.{} · 镜像 {} 字节 · 构建日期 {}",
-                info.hardware / 10,
-                info.hardware % 10,
-                info.application / 10,
-                info.application % 10,
-                info.image_size,
-                info.build_date
-            ));
+            ui.label(match lang {
+                Language::Chinese => format!(
+                    "硬件 {}.{} · 目标应用 V{}.{} · 镜像 {} 字节 · 构建日期 {}",
+                    info.hardware / 10,
+                    info.hardware % 10,
+                    info.application / 10,
+                    info.application % 10,
+                    info.image_size,
+                    info.build_date,
+                ),
+                Language::English => format!(
+                    "Hardware {}.{} · Target app V{}.{} · Image {} bytes · Built {}",
+                    info.hardware / 10,
+                    info.hardware % 10,
+                    info.application / 10,
+                    info.application % 10,
+                    info.image_size,
+                    info.build_date,
+                ),
+            });
             ui.checkbox(
                 &mut self.flash_confirmed,
-                "确认设备已进入升级模式，烧录期间保持供电和 HID 连接",
+                lang.pick(
+                    "确认设备已进入升级模式，烧录期间保持供电和 HID 连接",
+                    "I confirm the meter is in upgrade mode and will remain powered and connected",
+                ),
             );
             if ui
                 .add_enabled(
                     self.bootloader && self.flash_confirmed && !self.flashing,
-                    egui::Button::new("开始烧录"),
+                    egui::Button::new(lang.pick("开始烧录", "Start flashing")),
                 )
                 .clicked()
             {
                 let _ = self.commands.send(Command::Flash(path.clone()));
                 self.flashing = true;
                 self.progress = None;
-                self.status = "正在准备升级…".into();
+                self.status = Message::new("正在准备升级…", "Preparing firmware upgrade…");
             }
         }
         if let Some((done, total)) = self.progress {
@@ -333,7 +430,10 @@ impl App {
             );
         }
         if self.flashing {
-            ui.label("烧录中，请保持程序运行和设备连接。");
+            ui.label(lang.pick(
+                "烧录中，请保持程序运行和设备连接。",
+                "Flashing in progress. Keep this app open and the meter connected.",
+            ));
         }
     }
 }

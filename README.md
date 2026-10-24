@@ -1,6 +1,6 @@
 # ATK-UT70-RS
 
-正点原子 UT70 的跨平台上位机。通过仪表侧面的 USB HID 口读取电压、电流、D+/D−，绘制最近 60 秒曲线，可调整采样率、记录完整 CSV，并读取本地官方 `.atk` 文件烧录固件。界面使用 Rust、egui 和 egui_plot；HID 使用 hidapi。无需官方 Windows DLL。
+正点原子 UT70 的跨平台上位机。通过仪表侧面的 USB HID 口读取电压、电流、D+/D−，绘制最近 60 秒曲线，可调整采样率、记录完整 CSV，并读取本地官方 `.atk` 文件烧录固件。界面可切换简体中文和 English；使用 Rust、egui 和 egui_plot，HID 使用 hidapi。无需官方 Windows DLL。
 
 此仓库包含[逆向后的 HID 接口文档](docs/PROTOCOL.md)和客户端源码，不包含官方程序、固件、USB 抓包或个人测试日志。协议来自一台硬件 2.7、应用 V3.5 的 UT70；其他版本还需实机验证。已知限制与验证状态见[文档](docs/PROTOCOL.md#验证边界)。
 

@@ -1,6 +1,6 @@
-//! Owns the HID handle. GUI commands never read or write the device directly.
+//! 独占 HID 句柄；界面线程不直接读写设备。
 
-use crate::{firmware, protocol};
+use crate::{firmware, i18n::Message, protocol};
 use hidapi::{HidApi, HidDevice};
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -20,7 +20,7 @@ pub enum Command {
 }
 
 pub enum Event {
-    Status(String),
+    Status(Message),
     Connected(Option<protocol::VersionInfo>, u16, bool),
     Bootloader(protocol::VersionInfo),
     Disconnected,
@@ -30,7 +30,23 @@ pub enum Event {
     Recording(bool),
     FlashProgress(usize, usize),
     FlashDone(protocol::VersionInfo),
-    Error(String),
+    Error(Message),
+}
+
+fn send_status(tx: &Sender<Event>, chinese: impl Into<String>, english: impl Into<String>) {
+    let _ = tx.send(Event::Status(Message::new(chinese, english)));
+}
+
+fn send_error(tx: &Sender<Event>, chinese: impl Into<String>, english: impl Into<String>) {
+    let _ = tx.send(Event::Error(Message::new(chinese, english)));
+}
+
+fn send_failure(tx: &Sender<Event>, detail: &str) {
+    send_error(
+        tx,
+        format!("操作失败：{detail}"),
+        format!("Operation failed: {detail}"),
+    );
 }
 
 #[derive(Clone, Copy)]
@@ -66,9 +82,13 @@ pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
                         }
                         maybe_version => {
                             if let Err(e) = &maybe_version {
-                                let _ = tx.send(Event::Status(format!(
-                                    "版本查询失败，仍尝试接收测量数据：{e}"
-                                )));
+                                send_status(
+                                    &tx,
+                                    format!("版本查询失败，仍尝试接收测量数据：{e}"),
+                                    format!(
+                                        "Version query failed; still trying to receive measurements: {e}"
+                                    ),
+                                );
                             }
                             let mut rate_confirmed = false;
                             if let Ok(frame) =
@@ -88,7 +108,11 @@ pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
                 match result {
                     Ok(opened) => device = opened,
                     Err(e) => {
-                        let _ = tx.send(Event::Error(format!("连接失败：{e}")));
+                        send_error(
+                            &tx,
+                            format!("连接失败：{e}"),
+                            format!("Connection failed: {e}"),
+                        );
                     }
                 }
             }
@@ -103,7 +127,7 @@ pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
             Ok(Command::SetRate(requested)) => {
                 let result = device
                     .as_ref()
-                    .ok_or("设备尚未连接".to_string())
+                    .ok_or("device is not connected".to_string())
                     .and_then(|hid| {
                         let payload = protocol::rate_payload(requested)?;
                         let frame =
@@ -116,44 +140,58 @@ pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
                         let _ = tx.send(Event::Rate(actual));
                     }
                     Err(e) => {
-                        let _ = tx.send(Event::Error(e));
+                        send_failure(&tx, &e);
                     }
                 }
             }
             Ok(Command::SetScreen(screen)) => {
-                if !protocol::SCREENS.iter().any(|(id, _)| *id == screen) {
-                    let _ = tx.send(Event::Error("该界面尚未确认适合远程切换".into()));
+                if !protocol::SCREENS.iter().any(|(id, _, _)| *id == screen) {
+                    send_error(
+                        &tx,
+                        "该界面尚未确认适合远程切换",
+                        "This screen has not been verified for remote switching",
+                    );
                     continue;
                 }
                 let result = device
                     .as_ref()
-                    .ok_or("设备尚未连接".to_string())
+                    .ok_or("device is not connected".to_string())
                     .and_then(|hid| {
                         request(hid, protocol::FACE, &[screen, 1, 1, 1], 2, rate, start, &tx)?;
                         let frame = request(hid, protocol::FACE, &[0; 4], 2, rate, start, &tx)?;
-                        frame.payload.first().copied().ok_or("界面回复为空".into())
+                        frame
+                            .payload
+                            .first()
+                            .copied()
+                            .ok_or("empty screen response".into())
                     });
                 match result {
                     Ok(actual) if actual == screen => {
                         let _ = tx.send(Event::Screen(actual));
                     }
                     Ok(actual) => {
-                        let _ = tx.send(Event::Error(format!(
-                            "设备当前报告的界面为 {actual}，不是 {screen}"
-                        )));
+                        send_error(
+                            &tx,
+                            format!("设备当前报告的界面为 {actual}，不是 {screen}"),
+                            format!("Meter reports screen {actual}, not {screen}"),
+                        );
                     }
                     Err(e) => {
-                        let _ = tx.send(Event::Error(e));
+                        send_failure(&tx, &e);
                     }
                 }
             }
             Ok(Command::StartCsv(path)) => {
                 if device.is_none() {
-                    let _ = tx.send(Event::Error("请先连接设备".into()));
+                    send_error(&tx, "请先连接设备", "Connect the meter first");
                     continue;
                 }
                 if csv.is_some() {
-                    let _ = tx.send(Event::Error("正在记录，请先停止".into()));
+                    send_error(
+                        &tx,
+                        "正在记录，请先停止",
+                        "Stop the current recording first",
+                    );
                     continue;
                 }
                 match File::create(&path) {
@@ -166,12 +204,20 @@ pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
                                 let _ = tx.send(Event::Recording(true));
                             }
                             Err(e) => {
-                                let _ = tx.send(Event::Error(format!("CSV 写入失败：{e}")));
+                                send_error(
+                                    &tx,
+                                    format!("CSV 写入失败：{e}"),
+                                    format!("CSV write failed: {e}"),
+                                );
                             }
                         }
                     }
                     Err(e) => {
-                        let _ = tx.send(Event::Error(format!("无法创建 CSV：{e}")));
+                        send_error(
+                            &tx,
+                            format!("无法创建 CSV：{e}"),
+                            format!("Cannot create CSV: {e}"),
+                        );
                     }
                 }
             }
@@ -188,13 +234,21 @@ pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
                     let _ = tx.send(Event::Recording(false));
                 }
                 let _ = tx.send(Event::Disconnected);
-                let _ = tx.send(Event::Status("正在校验固件和升级模式…".into()));
+                send_status(
+                    &tx,
+                    "正在校验固件和升级模式…",
+                    "Checking firmware and upgrade mode…",
+                );
                 match flash(&path, &tx, start) {
                     Ok(info) => {
                         let _ = tx.send(Event::FlashDone(info));
                     }
                     Err(e) => {
-                        let _ = tx.send(Event::Error(format!("升级已停止：{e}")));
+                        send_error(
+                            &tx,
+                            format!("升级已停止：{e}"),
+                            format!("Upgrade stopped: {e}"),
+                        );
                     }
                 }
             }
@@ -209,13 +263,20 @@ pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
                                     if let Err(e) = write_csv(writer, &batch) {
                                         csv = None;
                                         let _ = tx.send(Event::Recording(false));
-                                        let _ = tx.send(Event::Error(format!("CSV 写入失败：{e}")));
+                                        send_error(
+                                            &tx,
+                                            format!("CSV 写入失败：{e}"),
+                                            format!("CSV write failed: {e}"),
+                                        );
                                     } else if last_flush.elapsed() >= Duration::from_secs(1) {
                                         if let Err(e) = writer.flush() {
                                             csv = None;
                                             let _ = tx.send(Event::Recording(false));
-                                            let _ =
-                                                tx.send(Event::Error(format!("CSV 刷盘失败：{e}")));
+                                            send_error(
+                                                &tx,
+                                                format!("CSV 刷盘失败：{e}"),
+                                                format!("CSV flush failed: {e}"),
+                                            );
                                         }
                                         last_flush = Instant::now();
                                     }
@@ -230,7 +291,11 @@ pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
                                 let _ = tx.send(Event::Recording(false));
                             }
                             let _ = tx.send(Event::Disconnected);
-                            let _ = tx.send(Event::Error(format!("HID 已断开：{e}")));
+                            send_error(
+                                &tx,
+                                format!("HID 已断开：{e}"),
+                                format!("HID disconnected: {e}"),
+                            );
                         }
                     }
                 } else {
@@ -308,13 +373,13 @@ fn request(
             }
         }
     }
-    Err(format!("命令 0x{command:02X} 超时"))
+    Err(format!("command 0x{command:02X} timed out"))
 }
 
 fn write_hid(hid: &HidDevice, report: &[u8; 65]) -> Result<(), String> {
     let n = hid.write(report).map_err(|e| e.to_string())?;
     if n != report.len() {
-        return Err(format!("HID 写入不完整：{n}/65"));
+        return Err(format!("short HID write: {n}/65"));
     }
     Ok(())
 }
@@ -337,18 +402,18 @@ fn boot_transact(
         let reply = firmware::decode(&buf[..n])?;
         if reply.command != command || reply.sequence != sequence {
             return Err(format!(
-                "升级应答命令或序号不匹配：0x{command:02X}/{sequence}"
+                "bootloader reply command or sequence mismatch: 0x{command:02X}/{sequence}"
             ));
         }
         if command != 0x10 && reply.payload != [1] {
             return Err(format!(
-                "设备拒绝命令 0x{command:02X}：{:02X?}",
+                "meter rejected command 0x{command:02X}: {:02X?}",
                 reply.payload
             ));
         }
         return Ok(reply);
     }
-    Err(format!("升级命令 0x{command:02X} 超时"))
+    Err(format!("upgrade command 0x{command:02X} timed out"))
 }
 
 fn flash(
@@ -363,11 +428,11 @@ fn flash(
         .map_err(|e| e.to_string())?;
     let mode = protocol::version(&request(&hid, protocol::VERSION, &[0, 0], 2, 4, start, tx)?)?;
     if !mode.boot_mode {
-        return Err("仪表未进入升级模式；按住右键并重新插入侧面 HID 线".into());
+        return Err("meter is not in upgrade mode; hold the right button while reconnecting the side HID cable".into());
     }
     let info = boot_transact(&hid, 0x10, 0, &[], 2)?;
     if info.payload.len() != 40 {
-        return Err("升级模式设备信息长度异常".into());
+        return Err("invalid bootloader device info length".into());
     }
     let name = info.payload[..16]
         .split(|b| *b == 0)
@@ -376,15 +441,22 @@ fn flash(
     let hardware = u16::from_le_bytes(info.payload[16..18].try_into().unwrap());
     if name != b"UT70" || hardware != fw.hardware {
         return Err(format!(
-            "固件与设备不匹配：固件硬件版本 {}，设备版本 {}",
+            "firmware hardware version {} does not match meter version {}",
             fw.hardware, hardware
         ));
     }
     let total = fw.image().len().div_ceil(firmware::CHUNK_SIZE);
-    let _ = tx.send(Event::Status(format!(
-        "正在烧录 {} 字节，目标固件 V{}",
-        fw.image_size, fw.application
-    )));
+    send_status(
+        tx,
+        format!(
+            "正在烧录 {} 字节，目标固件 V{}",
+            fw.image_size, fw.application
+        ),
+        format!(
+            "Flashing {} bytes, target app V{}",
+            fw.image_size, fw.application
+        ),
+    );
     boot_transact(&hid, 0x11, 0, fw.header(), 2)?;
     boot_transact(&hid, 0x12, 0, &[], 2)?;
     for (index, chunk) in fw.image().chunks(firmware::CHUNK_SIZE).enumerate() {
@@ -395,7 +467,11 @@ fn flash(
     }
     boot_transact(&hid, 0x14, 0, &[], 10)?;
     drop(hid);
-    let _ = tx.send(Event::Status("传输完成，等待仪表重启并校验版本…".into()));
+    send_status(
+        tx,
+        "传输完成，等待仪表重启并校验版本…",
+        "Transfer finished. Waiting for the meter to reboot and verifying its version…",
+    );
     let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline {
         if let Ok(api) = HidApi::new() {
@@ -404,7 +480,7 @@ fn flash(
                     if let Ok(version) = protocol::version(&frame) {
                         if !version.boot_mode {
                             if version.application as u16 != fw.application {
-                                return Err("重启后的应用版本与固件文件不符".into());
+                                return Err("application version after reboot does not match the firmware file".into());
                             }
                             return Ok(version);
                         }
@@ -414,5 +490,5 @@ fn flash(
         }
         std::thread::sleep(Duration::from_millis(250));
     }
-    Err("传输结束，但未能确认设备回到应用模式".into())
+    Err("transfer ended, but the meter did not return to application mode".into())
 }

@@ -7,14 +7,14 @@ pub const FACE: u8 = 0x03;
 pub const CV_DATA: u8 = 0x08;
 pub const FREQUENCY: u8 = 0x70;
 pub const RATES: [u16; 6] = [4, 10, 50, 200, 500, 1000];
-pub const SCREENS: &[(u8, &str)] = &[
-    (0, "基本测量"),
-    (1, "波形显示"),
-    (2, "数据记录"),
-    (3, "功能应用"),
-    (11, "监控模式"),
-    (19, "DASH 检测"),
-    (29, "设置"),
+pub const SCREENS: &[(u8, &str, &str)] = &[
+    (0, "基本测量", "Basic measurement"),
+    (1, "波形显示", "Waveform"),
+    (2, "数据记录", "Data logging"),
+    (3, "功能应用", "Functions"),
+    (11, "监控模式", "Monitor mode"),
+    (19, "DASH 检测", "DASH detection"),
+    (29, "设置", "Settings"),
 ];
 
 #[derive(Clone, Debug)]
