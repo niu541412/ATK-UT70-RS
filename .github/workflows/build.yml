@@ -1,0 +1,93 @@
+name: Build desktop client
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x86_64
+            os: windows-2022
+            target: x86_64-pc-windows-msvc
+            platform: windows
+            arch: x86_64
+          - name: windows-aarch64
+            os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            platform: windows
+            arch: aarch64
+          - name: macos-x86_64
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+            platform: macos
+            arch: x86_64
+          - name: macos-aarch64
+            os: macos-15
+            target: aarch64-apple-darwin
+            platform: macos
+            arch: aarch64
+          - name: linux-x86_64
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            platform: linux
+            arch: x86_64
+          - name: linux-aarch64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            platform: linux
+            arch: aarch64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux build libraries
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libudev-dev libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgtk-3-dev libdbus-1-dev libgl1-mesa-dev pkg-config
+      - name: Install Rust target
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add '${{ matrix.target }}'
+      - name: Test protocol and firmware framing
+        shell: bash
+        run: cargo test --locked --target '${{ matrix.target }}'
+      - name: Build release binary
+        shell: bash
+        run: cargo build --release --locked --target '${{ matrix.target }}'
+      - name: Package Windows
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive -Path 'target/${{ matrix.target }}/release/atk-ut70-rs.exe' -DestinationPath 'dist/ATK-UT70-RS-windows-${{ matrix.arch }}.zip'
+      - name: Package macOS app
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          mkdir -p ATK-UT70-RS.app/Contents/MacOS dist
+          cp "target/${{ matrix.target }}/release/atk-ut70-rs" ATK-UT70-RS.app/Contents/MacOS/
+          cp assets/Info.plist ATK-UT70-RS.app/Contents/
+          chmod +x ATK-UT70-RS.app/Contents/MacOS/atk-ut70-rs
+          zip -qry "dist/ATK-UT70-RS-macos-${{ matrix.arch }}.zip" ATK-UT70-RS.app
+      - name: Package Linux AppImage
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          mkdir -p target/release
+          cp "target/${{ matrix.target }}/release/atk-ut70-rs" target/release/atk-ut70-rs
+          bash scripts/build-appimage.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ATK-UT70-RS-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error

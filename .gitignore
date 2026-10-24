@@ -1,0 +1,15 @@
+/target/
+/dist/
+/AppDir/
+/.tools/
+*.atk
+*.pcap
+*.pcapng
+*.csv
+*.log
+*.exe
+*.AppImage
+*.zip
+*.app/
+!.github/
+!assets/

@@ -1,0 +1,19 @@
+[package]
+name = "atk-ut70-rs"
+version = "0.1.0"
+edition = "2024"
+description = "Cross-platform ATK UT70 HID monitor and firmware updater"
+repository = "https://github.com/niu541412/ATK-UT70-RS"
+
+[dependencies]
+eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "system_fonts", "x11", "wayland"] }
+egui_plot = "0.38"
+hidapi = "2.6"
+rfd = "0.17"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = "s"
+panic = "abort"
+strip = true

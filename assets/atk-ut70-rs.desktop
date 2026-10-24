@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=ATK UT70 RS
+Comment=ATK UT70 USB meter monitor and firmware updater
+Exec=atk-ut70-rs
+Icon=atk-ut70-rs
+Categories=Utility;Electronics;
+Terminal=false
