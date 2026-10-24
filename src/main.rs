@@ -56,12 +56,18 @@ impl App {
         while let Ok(event) = self.events.try_recv() {
             match event {
                 Event::Status(message) => self.status = message,
-                Event::Connected(version, rate) => {
+                Event::Connected(version, rate, rate_confirmed) => {
                     self.connected = true;
                     self.bootloader = false;
                     self.rate = rate;
+                    self.status = if !rate_confirmed {
+                        format!("已连接，采样率查询未响应；暂按 {rate} SPS 解析，请手动设置")
+                    } else if version.is_some() {
+                        format!("已连接；采样率 {rate} SPS")
+                    } else {
+                        format!("已连接；版本查询未响应，采样率已确认 {rate} SPS")
+                    };
                     self.version = version;
-                    self.status = format!("已连接；采样率 {rate} SPS");
                 }
                 Event::Bootloader(version) => {
                     self.connected = false;

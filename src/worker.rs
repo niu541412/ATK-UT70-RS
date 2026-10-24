@@ -21,7 +21,7 @@ pub enum Command {
 
 pub enum Event {
     Status(String),
-    Connected(Option<protocol::VersionInfo>, u16),
+    Connected(Option<protocol::VersionInfo>, u16, bool),
     Bootloader(protocol::VersionInfo),
     Disconnected,
     Rate(u16),
@@ -70,14 +70,17 @@ pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
                                     "版本查询失败，仍尝试接收测量数据：{e}"
                                 )));
                             }
+                            let mut rate_confirmed = false;
                             if let Ok(frame) =
                                 request(&hid, protocol::FREQUENCY, &[0; 4], 2, rate, start, &tx)
                             {
                                 if let Ok(current) = protocol::rate(&frame) {
                                     rate = current;
+                                    rate_confirmed = true;
                                 }
                             }
-                            let _ = tx.send(Event::Connected(maybe_version.ok(), rate));
+                            let _ =
+                                tx.send(Event::Connected(maybe_version.ok(), rate, rate_confirmed));
                             Ok(Some(hid))
                         }
                     }
