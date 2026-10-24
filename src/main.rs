@@ -106,7 +106,7 @@ impl App {
         for bucket in values.chunks(width) {
             let mut low = bucket[0];
             let mut high = bucket[0];
-            for item in bucket {
+            for &item in bucket {
                 if pick(&item.sample) < pick(&low.sample) { low = item; }
                 if pick(&item.sample) > pick(&high.sample) { high = item; }
             }
@@ -122,7 +122,7 @@ impl App {
         ui.heading("ATK UT70");
         ui.label(&self.status);
         if let Some(v) = &self.version {
-            ui.label(format!("{} · 硬件 2.{} · 应用 V{}.{} · Boot {} · 序列号 {}",
+            ui.label(format!("{} · 硬件 {}.{} · 应用 V{}.{} · Boot {} · 序列号 {}",
                 if v.boot_mode { "升级模式" } else { "应用模式" },
                 v.hardware / 10, v.hardware % 10, v.application / 10, v.application % 10,
                 v.bootloader, v.serial));
@@ -203,8 +203,9 @@ impl App {
         }
         if let Some((path, info)) = &self.firmware {
             ui.label(path.display().to_string());
-            ui.label(format!("硬件 2.{} · 目标应用 V{}.{} · 镜像 {} 字节 · 构建日期 {}",
-                info.hardware % 10, info.application / 10, info.application % 10, info.image_size, info.build_date));
+            ui.label(format!("硬件 {}.{} · 目标应用 V{}.{} · 镜像 {} 字节 · 构建日期 {}",
+                info.hardware / 10, info.hardware % 10, info.application / 10,
+                info.application % 10, info.image_size, info.build_date));
             ui.checkbox(&mut self.flash_confirmed, "确认设备已进入升级模式，烧录期间保持供电和 HID 连接");
             if ui.add_enabled(self.bootloader && self.flash_confirmed && !self.flashing,
                 egui::Button::new("开始烧录")).clicked() {
