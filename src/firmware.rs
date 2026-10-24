@@ -35,11 +35,21 @@ impl Firmware {
         }
         let year = u16::from_le_bytes([bytes[28], bytes[29]]);
         let build_date = format!("{year:04}-{:02}-{:02}", bytes[30], bytes[31]);
-        Ok(Self { bytes, hardware, application, image_size, build_date })
+        Ok(Self {
+            bytes,
+            hardware,
+            application,
+            image_size,
+            build_date,
+        })
     }
 
-    pub fn header(&self) -> &[u8] { &self.bytes[..32] }
-    pub fn image(&self) -> &[u8] { &self.bytes[32..] }
+    pub fn header(&self) -> &[u8] {
+        &self.bytes[..32]
+    }
+    pub fn image(&self) -> &[u8] {
+        &self.bytes[32..]
+    }
 }
 
 pub fn crc16_modbus(data: &[u8]) -> u16 {
@@ -47,7 +57,11 @@ pub fn crc16_modbus(data: &[u8]) -> u16 {
     for byte in data {
         crc ^= *byte as u16;
         for _ in 0..8 {
-            crc = if crc & 1 != 0 { (crc >> 1) ^ 0xA001 } else { crc >> 1 };
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0xA001
+            } else {
+                crc >> 1
+            };
         }
     }
     crc
@@ -73,7 +87,11 @@ pub struct Reply {
 }
 
 pub fn decode(report: &[u8]) -> Result<Reply, String> {
-    let data = if report.len() == 65 && report[0] == 0 { &report[1..] } else { report };
+    let data = if report.len() == 65 && report[0] == 0 {
+        &report[1..]
+    } else {
+        report
+    };
     if data.len() != 64 || data[0] != 0xFA {
         return Err("invalid bootloader reply".into());
     }
@@ -85,7 +103,11 @@ pub fn decode(report: &[u8]) -> Result<Reply, String> {
     if received != crc16_modbus(&data[..4 + n]) {
         return Err("bootloader CRC mismatch".into());
     }
-    Ok(Reply { command: data[1], sequence: data[2], payload: data[4..4 + n].to_vec() })
+    Ok(Reply {
+        command: data[1],
+        sequence: data[2],
+        payload: data[4..4 + n].to_vec(),
+    })
 }
 
 #[cfg(test)]

@@ -50,7 +50,9 @@ pub fn encode(command: u8, payload: &[u8]) -> Result<[u8; 65], String> {
     out[3] = payload.len() as u8;
     out[4..4 + payload.len()].copy_from_slice(payload);
     let checksum_at = 4 + payload.len();
-    out[checksum_at] = out[1..checksum_at].iter().fold(0u8, |acc, x| acc.wrapping_add(*x));
+    out[checksum_at] = out[1..checksum_at]
+        .iter()
+        .fold(0u8, |acc, x| acc.wrapping_add(*x));
     out[checksum_at + 1] = 0xFF;
     Ok(out)
 }
@@ -69,16 +71,22 @@ pub fn decode(report: &[u8], expected: Option<(u8, u8)>) -> Result<Frame, String
     if check_at >= data.len() {
         return Err("truncated application frame".into());
     }
-    let computed = data[..check_at].iter().fold(0u8, |acc, x| acc.wrapping_add(*x));
-    let special_rate_reply = expected
-        .is_some_and(|(cmd, sent_checksum)| cmd == FREQUENCY && data[1] == cmd && data[check_at] == sent_checksum);
+    let computed = data[..check_at]
+        .iter()
+        .fold(0u8, |acc, x| acc.wrapping_add(*x));
+    let special_rate_reply = expected.is_some_and(|(cmd, sent_checksum)| {
+        cmd == FREQUENCY && data[1] == cmd && data[check_at] == sent_checksum
+    });
     if data[check_at] != computed && !special_rate_reply {
         return Err("application frame checksum mismatch".into());
     }
     if data.get(check_at + 1).is_some_and(|end| *end != 0xFF) {
         return Err("application frame terminator mismatch".into());
     }
-    Ok(Frame { command: data[1], payload: data[3..check_at].to_vec() })
+    Ok(Frame {
+        command: data[1],
+        payload: data[3..check_at].to_vec(),
+    })
 }
 
 pub fn samples(frame: &Frame, rate: u16) -> Result<Vec<Sample>, String> {
@@ -96,9 +104,18 @@ pub fn samples(frame: &Frame, rate: u16) -> Result<Vec<Sample>, String> {
         if !voltage.is_finite() || !current.is_finite() {
             return Err("measurement contains a non-finite value".into());
         }
-        let dp = u16::from_le_bytes(frame.payload[40 + 2 * i..42 + 2 * i].try_into().unwrap()) as f32 / 10_000.0;
-        let dm = u16::from_le_bytes(frame.payload[50 + 2 * i..52 + 2 * i].try_into().unwrap()) as f32 / 10_000.0;
-        out.push(Sample { voltage, current, dp, dm });
+        let dp = u16::from_le_bytes(frame.payload[40 + 2 * i..42 + 2 * i].try_into().unwrap())
+            as f32
+            / 10_000.0;
+        let dm = u16::from_le_bytes(frame.payload[50 + 2 * i..52 + 2 * i].try_into().unwrap())
+            as f32
+            / 10_000.0;
+        out.push(Sample {
+            voltage,
+            current,
+            dp,
+            dm,
+        });
     }
     Ok(out)
 }
@@ -107,7 +124,9 @@ pub fn version(frame: &Frame) -> Result<VersionInfo, String> {
     if frame.command != VERSION || frame.payload.len() < 13 {
         return Err("incomplete version response".into());
     }
-    let serial = String::from_utf8_lossy(&frame.payload[4..12]).trim_end_matches('\0').to_owned();
+    let serial = String::from_utf8_lossy(&frame.payload[4..12])
+        .trim_end_matches('\0')
+        .to_owned();
     Ok(VersionInfo {
         bootloader: frame.payload[0],
         application: frame.payload[1],
@@ -121,11 +140,17 @@ pub fn rate(frame: &Frame) -> Result<u16, String> {
     if frame.command != FREQUENCY || frame.payload.len() < 2 {
         return Err("incomplete frequency response".into());
     }
-    RATES.get(frame.payload[1] as usize).copied().ok_or_else(|| "unknown rate index".into())
+    RATES
+        .get(frame.payload[1] as usize)
+        .copied()
+        .ok_or_else(|| "unknown rate index".into())
 }
 
 pub fn rate_payload(rate: u16) -> Result<[u8; 4], String> {
-    let index = RATES.iter().position(|candidate| *candidate == rate).ok_or("unsupported rate")?;
+    let index = RATES
+        .iter()
+        .position(|candidate| *candidate == rate)
+        .ok_or("unsupported rate")?;
     let [lo, hi] = rate.to_le_bytes();
     Ok([1, index as u8, lo, hi])
 }
@@ -145,7 +170,10 @@ mod tests {
     fn frequency_reply_accepts_only_matching_echoed_checksum() {
         let reply = [0xEE, 0x70, 4, 1, 4, 0, 0, 0x62, 0xFF];
         assert!(decode(&reply, None).is_err());
-        assert_eq!(rate(&decode(&reply, Some((FREQUENCY, 0x62))).unwrap()).unwrap(), 500);
+        assert_eq!(
+            rate(&decode(&reply, Some((FREQUENCY, 0x62))).unwrap()).unwrap(),
+            500
+        );
         assert!(decode(&reply, Some((FREQUENCY, 0x63))).is_err());
     }
 

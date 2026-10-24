@@ -49,10 +49,14 @@ pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
         match rx.try_recv() {
             Ok(Command::Quit) | Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
             Ok(Command::Connect) => {
-                if device.is_some() { continue; }
+                if device.is_some() {
+                    continue;
+                }
                 let result = (|| -> Result<Option<HidDevice>, String> {
                     let api = HidApi::new().map_err(|e| e.to_string())?;
-                    let hid = api.open(protocol::VID, protocol::PID).map_err(|e| e.to_string())?;
+                    let hid = api
+                        .open(protocol::VID, protocol::PID)
+                        .map_err(|e| e.to_string())?;
                     let version = request(&hid, protocol::VERSION, &[0, 0], 2, rate, start, &tx)
                         .and_then(|f| protocol::version(&f));
                     match version {
@@ -62,45 +66,82 @@ pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
                         }
                         maybe_version => {
                             if let Err(e) = &maybe_version {
-                                let _ = tx.send(Event::Status(format!("版本查询失败，仍尝试接收测量数据：{e}")));
+                                let _ = tx.send(Event::Status(format!(
+                                    "版本查询失败，仍尝试接收测量数据：{e}"
+                                )));
                             }
-                            if let Ok(frame) = request(&hid, protocol::FREQUENCY, &[0; 4], 2, rate, start, &tx) {
-                                if let Ok(current) = protocol::rate(&frame) { rate = current; }
+                            if let Ok(frame) =
+                                request(&hid, protocol::FREQUENCY, &[0; 4], 2, rate, start, &tx)
+                            {
+                                if let Ok(current) = protocol::rate(&frame) {
+                                    rate = current;
+                                }
                             }
                             let _ = tx.send(Event::Connected(maybe_version.ok(), rate));
                             Ok(Some(hid))
                         }
                     }
                 })();
-                match result { Ok(opened) => device = opened, Err(e) => { let _ = tx.send(Event::Error(format!("连接失败：{e}"))); } }
+                match result {
+                    Ok(opened) => device = opened,
+                    Err(e) => {
+                        let _ = tx.send(Event::Error(format!("连接失败：{e}")));
+                    }
+                }
             }
             Ok(Command::Disconnect) => {
                 device = None;
-                if let Some(mut writer) = csv.take() { let _ = writer.flush(); let _ = tx.send(Event::Recording(false)); }
+                if let Some(mut writer) = csv.take() {
+                    let _ = writer.flush();
+                    let _ = tx.send(Event::Recording(false));
+                }
                 let _ = tx.send(Event::Disconnected);
             }
             Ok(Command::SetRate(requested)) => {
-                let result = device.as_ref().ok_or("设备尚未连接".to_string()).and_then(|hid| {
-                    let payload = protocol::rate_payload(requested)?;
-                    let frame = request(hid, protocol::FREQUENCY, &payload, 2, rate, start, &tx)?;
-                    protocol::rate(&frame)
-                });
-                match result { Ok(actual) => { rate = actual; let _ = tx.send(Event::Rate(actual)); }, Err(e) => { let _ = tx.send(Event::Error(e)); } }
+                let result = device
+                    .as_ref()
+                    .ok_or("设备尚未连接".to_string())
+                    .and_then(|hid| {
+                        let payload = protocol::rate_payload(requested)?;
+                        let frame =
+                            request(hid, protocol::FREQUENCY, &payload, 2, rate, start, &tx)?;
+                        protocol::rate(&frame)
+                    });
+                match result {
+                    Ok(actual) => {
+                        rate = actual;
+                        let _ = tx.send(Event::Rate(actual));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Event::Error(e));
+                    }
+                }
             }
             Ok(Command::SetScreen(screen)) => {
                 if !protocol::SCREENS.iter().any(|(id, _)| *id == screen) {
                     let _ = tx.send(Event::Error("该界面尚未确认适合远程切换".into()));
                     continue;
                 }
-                let result = device.as_ref().ok_or("设备尚未连接".to_string()).and_then(|hid| {
-                    request(hid, protocol::FACE, &[screen, 1, 1, 1], 2, rate, start, &tx)?;
-                    let frame = request(hid, protocol::FACE, &[0; 4], 2, rate, start, &tx)?;
-                    frame.payload.first().copied().ok_or("界面回复为空".into())
-                });
+                let result = device
+                    .as_ref()
+                    .ok_or("设备尚未连接".to_string())
+                    .and_then(|hid| {
+                        request(hid, protocol::FACE, &[screen, 1, 1, 1], 2, rate, start, &tx)?;
+                        let frame = request(hid, protocol::FACE, &[0; 4], 2, rate, start, &tx)?;
+                        frame.payload.first().copied().ok_or("界面回复为空".into())
+                    });
                 match result {
-                    Ok(actual) if actual == screen => { let _ = tx.send(Event::Screen(actual)); }
-                    Ok(actual) => { let _ = tx.send(Event::Error(format!("设备当前报告的界面为 {actual}，不是 {screen}"))); }
-                    Err(e) => { let _ = tx.send(Event::Error(e)); }
+                    Ok(actual) if actual == screen => {
+                        let _ = tx.send(Event::Screen(actual));
+                    }
+                    Ok(actual) => {
+                        let _ = tx.send(Event::Error(format!(
+                            "设备当前报告的界面为 {actual}，不是 {screen}"
+                        )));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Event::Error(e));
+                    }
                 }
             }
             Ok(Command::StartCsv(path)) => {
@@ -116,25 +157,42 @@ pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
                     Ok(file) => {
                         let mut writer = BufWriter::new(file);
                         match writer.write_all(b"time_s,voltage_v,current_a,power_w,dp_v,dm_v\n") {
-                            Ok(()) => { csv = Some(writer); last_flush = Instant::now(); let _ = tx.send(Event::Recording(true)); }
-                            Err(e) => { let _ = tx.send(Event::Error(format!("CSV 写入失败：{e}"))); }
+                            Ok(()) => {
+                                csv = Some(writer);
+                                last_flush = Instant::now();
+                                let _ = tx.send(Event::Recording(true));
+                            }
+                            Err(e) => {
+                                let _ = tx.send(Event::Error(format!("CSV 写入失败：{e}")));
+                            }
                         }
                     }
-                    Err(e) => { let _ = tx.send(Event::Error(format!("无法创建 CSV：{e}"))); }
+                    Err(e) => {
+                        let _ = tx.send(Event::Error(format!("无法创建 CSV：{e}")));
+                    }
                 }
             }
             Ok(Command::StopCsv) => {
-                if let Some(mut writer) = csv.take() { let _ = writer.flush(); }
+                if let Some(mut writer) = csv.take() {
+                    let _ = writer.flush();
+                }
                 let _ = tx.send(Event::Recording(false));
             }
             Ok(Command::Flash(path)) => {
                 device = None;
-                if let Some(mut writer) = csv.take() { let _ = writer.flush(); let _ = tx.send(Event::Recording(false)); }
+                if let Some(mut writer) = csv.take() {
+                    let _ = writer.flush();
+                    let _ = tx.send(Event::Recording(false));
+                }
                 let _ = tx.send(Event::Disconnected);
                 let _ = tx.send(Event::Status("正在校验固件和升级模式…".into()));
                 match flash(&path, &tx, start) {
-                    Ok(info) => { let _ = tx.send(Event::FlashDone(info)); }
-                    Err(e) => { let _ = tx.send(Event::Error(format!("升级已停止：{e}"))); }
+                    Ok(info) => {
+                        let _ = tx.send(Event::FlashDone(info));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Event::Error(format!("升级已停止：{e}")));
+                    }
                 }
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {
@@ -153,7 +211,8 @@ pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
                                         if let Err(e) = writer.flush() {
                                             csv = None;
                                             let _ = tx.send(Event::Recording(false));
-                                            let _ = tx.send(Event::Error(format!("CSV 刷盘失败：{e}")));
+                                            let _ =
+                                                tx.send(Event::Error(format!("CSV 刷盘失败：{e}")));
                                         }
                                         last_flush = Instant::now();
                                     }
@@ -163,7 +222,10 @@ pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
                         }
                         Err(e) => {
                             device = None;
-                            if let Some(mut writer) = csv.take() { let _ = writer.flush(); let _ = tx.send(Event::Recording(false)); }
+                            if let Some(mut writer) = csv.take() {
+                                let _ = writer.flush();
+                                let _ = tx.send(Event::Recording(false));
+                            }
                             let _ = tx.send(Event::Disconnected);
                             let _ = tx.send(Event::Error(format!("HID 已断开：{e}")));
                         }
@@ -179,26 +241,49 @@ pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
 fn write_csv(writer: &mut BufWriter<File>, batch: &[TimedSample]) -> std::io::Result<()> {
     for item in batch {
         let s = item.sample;
-        writeln!(writer, "{:.6},{:.8},{:.8},{:.8},{:.6},{:.6}",
-            item.seconds, s.voltage, s.current, s.voltage * s.current, s.dp, s.dm)?;
+        writeln!(
+            writer,
+            "{:.6},{:.8},{:.8},{:.8},{:.6},{:.6}",
+            item.seconds,
+            s.voltage,
+            s.current,
+            s.voltage * s.current,
+            s.dp,
+            s.dm
+        )?;
     }
     Ok(())
 }
 
 fn process_sample_report(report: &[u8], rate: u16, start: Instant) -> Option<Vec<TimedSample>> {
     let frame = protocol::decode(report, None).ok()?;
-    if frame.command != protocol::CV_DATA { return None; }
+    if frame.command != protocol::CV_DATA {
+        return None;
+    }
     let points = protocol::samples(&frame, rate).ok()?;
     let count = points.len();
     let now = start.elapsed().as_secs_f64();
-    Some(points.into_iter().enumerate().map(|(i, sample)| TimedSample {
-        seconds: now - (count - 1 - i) as f64 / rate as f64,
-        sample,
-    }).collect())
+    Some(
+        points
+            .into_iter()
+            .enumerate()
+            .map(|(i, sample)| TimedSample {
+                seconds: now - (count - 1 - i) as f64 / rate as f64,
+                sample,
+            })
+            .collect(),
+    )
 }
 
-fn request(hid: &HidDevice, command: u8, payload: &[u8], timeout_secs: u64,
-           rate: u16, start: Instant, tx: &Sender<Event>) -> Result<protocol::Frame, String> {
+fn request(
+    hid: &HidDevice,
+    command: u8,
+    payload: &[u8],
+    timeout_secs: u64,
+    rate: u16,
+    start: Instant,
+    tx: &Sender<Event>,
+) -> Result<protocol::Frame, String> {
     let report = protocol::encode(command, payload)?;
     write_hid(hid, &report)?;
     let sent_checksum = report[4 + payload.len()];
@@ -206,9 +291,13 @@ fn request(hid: &HidDevice, command: u8, payload: &[u8], timeout_secs: u64,
     while Instant::now() < deadline {
         let mut buf = [0u8; 64];
         let n = hid.read_timeout(&mut buf, 100).map_err(|e| e.to_string())?;
-        if n == 0 { continue; }
+        if n == 0 {
+            continue;
+        }
         if let Ok(frame) = protocol::decode(&buf[..n], Some((command, sent_checksum))) {
-            if frame.command == command { return Ok(frame); }
+            if frame.command == command {
+                return Ok(frame);
+            }
             if frame.command == protocol::CV_DATA {
                 if let Some(batch) = process_sample_report(&buf[..n], rate, start) {
                     let _ = tx.send(Event::Samples(batch));
@@ -221,44 +310,78 @@ fn request(hid: &HidDevice, command: u8, payload: &[u8], timeout_secs: u64,
 
 fn write_hid(hid: &HidDevice, report: &[u8; 65]) -> Result<(), String> {
     let n = hid.write(report).map_err(|e| e.to_string())?;
-    if n != report.len() { return Err(format!("HID 写入不完整：{n}/65")); }
+    if n != report.len() {
+        return Err(format!("HID 写入不完整：{n}/65"));
+    }
     Ok(())
 }
 
-fn boot_transact(hid: &HidDevice, command: u8, sequence: u8, payload: &[u8], timeout_secs: u64) -> Result<firmware::Reply, String> {
+fn boot_transact(
+    hid: &HidDevice,
+    command: u8,
+    sequence: u8,
+    payload: &[u8],
+    timeout_secs: u64,
+) -> Result<firmware::Reply, String> {
     write_hid(hid, &firmware::encode(command, sequence, payload)?)?;
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     while Instant::now() < deadline {
         let mut buf = [0u8; 64];
         let n = hid.read_timeout(&mut buf, 100).map_err(|e| e.to_string())?;
-        if n == 0 { continue; }
+        if n == 0 {
+            continue;
+        }
         let reply = firmware::decode(&buf[..n])?;
         if reply.command != command || reply.sequence != sequence {
-            return Err(format!("升级应答命令或序号不匹配：0x{command:02X}/{sequence}"));
+            return Err(format!(
+                "升级应答命令或序号不匹配：0x{command:02X}/{sequence}"
+            ));
         }
         if command != 0x10 && reply.payload != [1] {
-            return Err(format!("设备拒绝命令 0x{command:02X}：{:02X?}", reply.payload));
+            return Err(format!(
+                "设备拒绝命令 0x{command:02X}：{:02X?}",
+                reply.payload
+            ));
         }
         return Ok(reply);
     }
     Err(format!("升级命令 0x{command:02X} 超时"))
 }
 
-fn flash(path: &PathBuf, tx: &Sender<Event>, start: Instant) -> Result<protocol::VersionInfo, String> {
+fn flash(
+    path: &PathBuf,
+    tx: &Sender<Event>,
+    start: Instant,
+) -> Result<protocol::VersionInfo, String> {
     let fw = firmware::Firmware::read(path)?;
     let api = HidApi::new().map_err(|e| e.to_string())?;
-    let hid = api.open(protocol::VID, protocol::PID).map_err(|e| e.to_string())?;
+    let hid = api
+        .open(protocol::VID, protocol::PID)
+        .map_err(|e| e.to_string())?;
     let mode = protocol::version(&request(&hid, protocol::VERSION, &[0, 0], 2, 4, start, tx)?)?;
-    if !mode.boot_mode { return Err("仪表未进入升级模式；按住右键并重新插入侧面 HID 线".into()); }
+    if !mode.boot_mode {
+        return Err("仪表未进入升级模式；按住右键并重新插入侧面 HID 线".into());
+    }
     let info = boot_transact(&hid, 0x10, 0, &[], 2)?;
-    if info.payload.len() != 40 { return Err("升级模式设备信息长度异常".into()); }
-    let name = info.payload[..16].split(|b| *b == 0).next().unwrap_or_default();
+    if info.payload.len() != 40 {
+        return Err("升级模式设备信息长度异常".into());
+    }
+    let name = info.payload[..16]
+        .split(|b| *b == 0)
+        .next()
+        .unwrap_or_default();
     let hardware = u16::from_le_bytes(info.payload[16..18].try_into().unwrap());
     if name != b"UT70" || hardware != fw.hardware {
-        return Err(format!("固件与设备不匹配：固件硬件版本 {}，设备版本 {}", fw.hardware, hardware));
+        return Err(format!(
+            "固件与设备不匹配：固件硬件版本 {}，设备版本 {}",
+            fw.hardware, hardware
+        ));
     }
     let total = fw.image().len().div_ceil(firmware::CHUNK_SIZE);
-    let _ = tx.send(Event::Status(format!("正在烧录 {} 字节，目标固件 V{}", fw.image_size, fw.application)));
+    let _ = tx.send(Event::Status(format!(
+        "正在烧录 {} 字节，目标固件 V{}",
+        fw.image_size, fw.application
+    )));
     boot_transact(&hid, 0x11, 0, fw.header(), 2)?;
     boot_transact(&hid, 0x12, 0, &[], 2)?;
     for (index, chunk) in fw.image().chunks(firmware::CHUNK_SIZE).enumerate() {
