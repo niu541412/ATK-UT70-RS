@@ -29,7 +29,7 @@ pub enum Event {
     Samples(Vec<TimedSample>),
     Recording(bool),
     FlashProgress(usize, usize),
-    FlashDone(protocol::VersionInfo),
+    FlashDone,
     Error(Message),
 }
 
@@ -78,7 +78,7 @@ pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
                     match version {
                         Ok(v) if v.boot_mode => {
                             let _ = tx.send(Event::Bootloader(v));
-                            Ok(None)
+                            Ok(Some(hid))
                         }
                         maybe_version => {
                             if let Err(e) = &maybe_version {
@@ -240,8 +240,8 @@ pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
                     "Checking firmware and upgrade mode…",
                 );
                 match flash(&path, &tx, start) {
-                    Ok(info) => {
-                        let _ = tx.send(Event::FlashDone(info));
+                    Ok(_) => {
+                        let _ = tx.send(Event::FlashDone);
                     }
                     Err(e) => {
                         send_error(

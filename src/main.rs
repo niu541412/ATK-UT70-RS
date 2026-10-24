@@ -6,13 +6,69 @@ mod protocol;
 mod worker;
 
 use eframe::egui;
-use egui_plot::{Line, Plot};
+use egui_plot::{Legend, Line, Plot};
 use i18n::{Language, Message};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 use worker::{Command, Event, TimedSample};
+
+#[derive(Clone, Copy)]
+enum Metric {
+    Voltage,
+    Current,
+    Power,
+    Dp,
+    Dm,
+    Resistance,
+}
+
+impl Metric {
+    const ALL: [Self; 6] = [
+        Self::Voltage,
+        Self::Current,
+        Self::Power,
+        Self::Dp,
+        Self::Dm,
+        Self::Resistance,
+    ];
+
+    fn title(self, lang: Language) -> &'static str {
+        match self {
+            Self::Voltage => lang.pick("电压 V", "Voltage V"),
+            Self::Current => lang.pick("电流 A", "Current A"),
+            Self::Power => lang.pick("功率 W", "Power W"),
+            Self::Dp => "D+ V",
+            Self::Dm => "D− V",
+            Self::Resistance => lang.pick("负载电阻 Ω", "Load resistance Ω"),
+        }
+    }
+
+    fn color(self) -> egui::Color32 {
+        match self {
+            Self::Voltage => egui::Color32::from_rgb(60, 210, 110),
+            Self::Current => egui::Color32::from_rgb(235, 85, 90),
+            Self::Power => egui::Color32::from_rgb(170, 105, 235),
+            Self::Dp => egui::Color32::from_rgb(70, 190, 235),
+            Self::Dm => egui::Color32::from_rgb(240, 160, 65),
+            Self::Resistance => egui::Color32::from_rgb(225, 205, 75),
+        }
+    }
+
+    fn value(self, sample: &protocol::Sample) -> Option<f64> {
+        let value = match self {
+            Self::Voltage => sample.voltage as f64,
+            Self::Current => sample.current as f64,
+            Self::Power => (sample.voltage * sample.current) as f64,
+            Self::Dp => sample.dp as f64,
+            Self::Dm => sample.dm as f64,
+            Self::Resistance if sample.current > 0.001 => (sample.voltage / sample.current) as f64,
+            Self::Resistance => return None,
+        };
+        value.is_finite().then_some(value)
+    }
+}
 
 struct App {
     commands: Sender<Command>,
@@ -30,6 +86,8 @@ struct App {
     firmware: Option<(PathBuf, firmware::Firmware)>,
     flash_confirmed: bool,
     progress: Option<(usize, usize)>,
+    firmware_dialog_open: bool,
+    trace_visible: [bool; 6],
 }
 
 impl App {
@@ -37,14 +95,12 @@ impl App {
         let (command_tx, command_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
         std::thread::spawn(move || worker::run(command_rx, event_tx));
+        let _ = command_tx.send(Command::Connect);
         Self {
             commands: command_tx,
             events: event_rx,
             samples: VecDeque::new(),
-            status: Message::new(
-                "连接 UT70 侧面 HID 口后点击“连接”",
-                "Connect the UT70 side HID port, then select Connect",
-            ),
+            status: Message::new("正在连接 UT70…", "Connecting to UT70…"),
             language: Language::Chinese,
             connected: false,
             bootloader: false,
@@ -56,6 +112,8 @@ impl App {
             firmware: None,
             flash_confirmed: false,
             progress: None,
+            firmware_dialog_open: false,
+            trace_visible: [true, true, false, false, false, false],
         }
     }
 
@@ -92,13 +150,22 @@ impl App {
                 Event::Bootloader(version) => {
                     self.connected = false;
                     self.bootloader = true;
+                    self.samples.clear();
+                    self.flash_confirmed = false;
                     self.version = Some(version);
                     self.status = Message::new(
                         "仪表处于升级模式，可选择本地 .atk 固件",
                         "The meter is in upgrade mode. Select a local .atk firmware file.",
                     );
                 }
-                Event::Disconnected => self.connected = false,
+                Event::Disconnected => {
+                    self.connected = false;
+                    self.bootloader = false;
+                    self.version = None;
+                    self.samples.clear();
+                    self.flash_confirmed = false;
+                    self.status = Message::new("已断开设备", "Meter disconnected");
+                }
                 Event::Rate(rate) => {
                     self.rate = rate;
                     self.status = Message::new(
@@ -128,10 +195,10 @@ impl App {
                 }
                 Event::Recording(value) => self.recording = value,
                 Event::FlashProgress(done, total) => self.progress = Some((done, total)),
-                Event::FlashDone(version) => {
+                Event::FlashDone => {
                     self.flashing = false;
                     self.bootloader = false;
-                    self.version = Some(version);
+                    self.version = None;
                     self.flash_confirmed = false;
                     self.status = Message::new(
                         "烧录完成；设备已重启并通过应用版本校验。点击连接开始测量。",
@@ -150,20 +217,28 @@ impl App {
         self.samples.back().map(|item| item.sample)
     }
 
-    fn chart_points(&self, pick: impl Fn(&protocol::Sample) -> f64) -> Vec<[f64; 2]> {
-        // 每张曲线最多绘制约 2000 个点；CSV 仍记录收到的全部测量点。
+    fn chart_points(&self, metric: Metric) -> Vec<[f64; 2]> {
+        // 每条曲线最多绘制约 2000 个点；CSV 仍记录收到的全部测量点。
         let width = self.samples.len().div_ceil(1000).max(1);
         let values: Vec<_> = self.samples.iter().collect();
         let mut out = Vec::with_capacity(values.len().min(2000));
         for bucket in values.chunks(width) {
-            let mut low = bucket[0];
-            let mut high = bucket[0];
-            for &item in bucket {
-                if pick(&item.sample) < pick(&low.sample) {
+            let mut valid = bucket
+                .iter()
+                .filter_map(|item| metric.value(&item.sample).map(|value| (*item, value)));
+            let Some((mut low, mut low_value)) = valid.next() else {
+                continue;
+            };
+            let mut high = low;
+            let mut high_value = low_value;
+            for (item, value) in valid {
+                if value < low_value {
                     low = item;
+                    low_value = value;
                 }
-                if pick(&item.sample) > pick(&high.sample) {
+                if value > high_value {
                     high = item;
+                    high_value = value;
                 }
             }
             let first = if low.seconds <= high.seconds {
@@ -176,16 +251,24 @@ impl App {
             } else {
                 low
             };
-            out.push([first.seconds, pick(&first.sample)]);
+            out.push([first.seconds, metric.value(&first.sample).unwrap()]);
             if first.seconds != second.seconds {
-                out.push([second.seconds, pick(&second.sample)]);
+                out.push([second.seconds, metric.value(&second.sample).unwrap()]);
             }
         }
         out
     }
 
     fn header(&mut self, ui: &mut egui::Ui) {
-        ui.heading("ATK UT70");
+        ui.horizontal(|ui| {
+            ui.heading("ATK UT70");
+            if ui
+                .button(self.language.pick("固件更新", "Firmware update"))
+                .clicked()
+            {
+                self.firmware_dialog_open = true;
+            }
+        });
         egui::ComboBox::from_label(self.language.pick("语言", "Language"))
             .selected_text(match self.language {
                 Language::Chinese => "简体中文",
@@ -232,8 +315,8 @@ impl App {
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(
-                    !self.connected && !self.flashing,
-                    egui::Button::new(lang.pick("连接 / 检测模式", "Connect / detect mode")),
+                    !self.connected && !self.bootloader && !self.flashing,
+                    egui::Button::new(lang.pick("连接设备", "Connect meter")),
                 )
                 .clicked()
             {
@@ -242,7 +325,7 @@ impl App {
             }
             if ui
                 .add_enabled(
-                    self.connected && !self.flashing,
+                    (self.connected || self.bootloader) && !self.flashing,
                     egui::Button::new(lang.pick("断开", "Disconnect")),
                 )
                 .clicked()
@@ -309,48 +392,75 @@ impl App {
         });
     }
 
-    fn plots(&self, ui: &mut egui::Ui) {
+    fn reading(ui: &mut egui::Ui, title: &str, value: String, color: egui::Color32) {
+        ui.group(|ui| {
+            ui.label(title);
+            ui.label(egui::RichText::new(value).size(30.0).strong().color(color));
+        });
+    }
+
+    fn plots(&mut self, ui: &mut egui::Ui) {
         let lang = self.language;
         ui.separator();
-        if let Some(s) = self.latest() {
-            ui.horizontal(|ui| {
-                ui.strong(format!("{:.4} V", s.voltage));
-                ui.strong(format!("{:.4} A", s.current));
-                ui.label(format!("{:.4} W", s.voltage * s.current));
-                ui.label(format!("D+ {:.4} V  D− {:.4} V", s.dp, s.dm));
-            });
+        let latest = self.latest();
+        ui.columns(3, |columns| {
+            Self::reading(
+                &mut columns[0],
+                lang.pick("电压", "Voltage"),
+                latest.map_or("—".into(), |s| format!("{:.3} V", s.voltage)),
+                Metric::Voltage.color(),
+            );
+            Self::reading(
+                &mut columns[1],
+                lang.pick("电流", "Current"),
+                latest.map_or("—".into(), |s| format!("{:.3} A", s.current)),
+                Metric::Current.color(),
+            );
+            Self::reading(
+                &mut columns[2],
+                lang.pick("功率", "Power"),
+                latest.map_or("—".into(), |s| format!("{:.3} W", s.voltage * s.current)),
+                Metric::Power.color(),
+            );
+        });
+        if let Some(s) = latest {
+            ui.label(format!("D+ {:.4} V     D− {:.4} V", s.dp, s.dm));
         } else {
             ui.label(lang.pick("暂无测量数据", "No measurement data yet"));
         }
-        Plot::new("voltage_plot")
-            .height(220.0)
+        ui.horizontal_wrapped(|ui| {
+            for (index, metric) in Metric::ALL.iter().enumerate() {
+                ui.checkbox(
+                    &mut self.trace_visible[index],
+                    egui::RichText::new(metric.title(lang)).color(metric.color()),
+                );
+            }
+        });
+        let visible = self.trace_visible;
+        Plot::new("measurements_plot")
+            .height(320.0)
+            .legend(Legend::default())
             .x_axis_label(lang.pick("秒", "Seconds"))
-            .y_axis_label(lang.pick("电压 V", "Voltage V"))
+            .y_axis_label(lang.pick("数值（单位见图例）", "Value (units in legend)"))
             .show(ui, |plot| {
-                plot.line(Line::new(
-                    lang.pick("电压", "Voltage"),
-                    self.chart_points(|s| s.voltage as f64),
-                ));
-            });
-        Plot::new("current_plot")
-            .height(220.0)
-            .x_axis_label(lang.pick("秒", "Seconds"))
-            .y_axis_label(lang.pick("电流 A", "Current A"))
-            .show(ui, |plot| {
-                plot.line(Line::new(
-                    lang.pick("电流", "Current"),
-                    self.chart_points(|s| s.current as f64),
-                ));
+                for (index, metric) in Metric::ALL.iter().enumerate() {
+                    if visible[index] {
+                        plot.line(
+                            Line::new(metric.title(lang), self.chart_points(*metric))
+                                .color(metric.color())
+                                .width(2.0),
+                        );
+                    }
+                }
             });
         ui.small(lang.pick(
-            "曲线显示最近 60 秒，并限制绘图点数；CSV 记录全部收到的测量点。",
-            "Charts show the latest 60 seconds with limited drawing points; CSV stores every received sample.",
+            "曲线显示最近 60 秒。负载电阻按 V/I 计算，电流不高于 1 mA 时不绘制；它不是线阻。CSV 记录全部测量点。",
+            "Charts show the latest 60 seconds. Load resistance is V/I and is omitted at or below 1 mA; it is not cable resistance. CSV stores all samples.",
         ));
     }
 
     fn flashing_controls(&mut self, ui: &mut egui::Ui) {
         let lang = self.language;
-        ui.separator();
         ui.heading(lang.pick("本地固件升级", "Local firmware upgrade"));
         ui.label(lang.pick(
             "先拔下侧面 HID 线，按住仪表右键重新插入，使仪表进入升级模式。选择适配硬件版本的官方 .atk 文件。",
@@ -449,9 +559,17 @@ impl eframe::App for App {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 self.header(ui);
                 self.plots(ui);
-                self.flashing_controls(ui);
             });
         });
+        if self.firmware_dialog_open {
+            let mut open = true;
+            egui::Window::new(self.language.pick("固件更新", "Firmware update"))
+                .open(&mut open)
+                .default_size([600.0, 300.0])
+                .scroll(true)
+                .show(ui.ctx(), |ui| self.flashing_controls(ui));
+            self.firmware_dialog_open = open;
+        }
         ui.ctx()
             .request_repaint_after(if self.connected || self.flashing {
                 Duration::from_millis(50)
@@ -470,7 +588,12 @@ impl Drop for App {
 fn main() -> eframe::Result<()> {
     eframe::run_native(
         "ATK UT70 RS",
-        eframe::NativeOptions::default(),
+        eframe::NativeOptions {
+            viewport: egui::ViewportBuilder::default()
+                .with_inner_size([980.0, 650.0])
+                .with_min_inner_size([720.0, 480.0]),
+            ..Default::default()
+        },
         Box::new(|_| Ok(Box::new(App::new()))),
     )
 }
