@@ -8,15 +8,18 @@ pub const CV_DATA: u8 = 0x08;
 pub const FREQUENCY: u8 = 0x70;
 pub const FAST_CHARGE: u8 = 0x20;
 pub const FAST_CHARGE_DESCRIPTION: u8 = 0x21;
-pub const PROTOCOL_TYPES: [u8; 15] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 20];
+pub const PROTOCOL_TYPES: [u8; 13] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 13, 20];
 pub const RATES: [u16; 6] = [4, 10, 50, 200, 500, 1000];
 pub const SCREENS: &[(u8, &str, &str)] = &[
     (0, "基本测量", "Basic measurement"),
     (1, "波形显示", "Waveform"),
     (2, "数据记录", "Data logging"),
     (3, "功能应用", "Functions"),
+    (4, "手动触发", "Manual trigger"),
+    (5, "自动检测", "Auto detection"),
     (11, "监控模式", "Monitor mode"),
     (19, "DASH 检测", "DASH detection"),
+    (20, "E-Marker 检测", "E-Marker detection"),
     (29, "设置", "Settings"),
 ];
 

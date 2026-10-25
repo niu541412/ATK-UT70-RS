@@ -27,6 +27,7 @@ pub enum Event {
     Disconnected,
     Rate(u16),
     Screen(u8),
+    ScreenCommandSent(u8),
     ProtocolScanStarted,
     ProtocolReport(protocol::ProtocolReport),
     ProtocolScanFinished,
@@ -170,6 +171,21 @@ pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
                     );
                     continue;
                 }
+                if matches!(screen, 4 | 5 | 20) {
+                    let result = device
+                        .as_ref()
+                        .ok_or("device is not connected".to_string())
+                        .and_then(|hid| {
+                            write_hid(hid, &protocol::encode(protocol::FACE, &[screen, 1, 1, 1])?)
+                        });
+                    match result {
+                        Ok(()) => {
+                            let _ = tx.send(Event::ScreenCommandSent(screen));
+                        }
+                        Err(e) => send_failure(&tx, &e),
+                    }
+                    continue;
+                }
                 let result = device
                     .as_ref()
                     .ok_or("device is not connected".to_string())
@@ -297,6 +313,11 @@ pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
                         Ok(0) => {}
                         Ok(n) => {
                             if let Ok(frame) = protocol::decode(&buf[..n], None) {
+                                if frame.command == protocol::FACE {
+                                    if let Some(screen) = frame.payload.first() {
+                                        let _ = tx.send(Event::Screen(*screen));
+                                    }
+                                }
                                 if scan_deadline.is_some() {
                                     if let Ok(report) = protocol::protocol_report(&frame) {
                                         scan_last_report = Some(Instant::now());

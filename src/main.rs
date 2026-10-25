@@ -175,6 +175,7 @@ struct App {
     recording: bool,
     rate: u16,
     screen: u8,
+    pending_screen: Option<u8>,
     version: Option<protocol::VersionInfo>,
     firmware: Option<(PathBuf, firmware::Firmware)>,
     flash_confirmed: bool,
@@ -219,6 +220,7 @@ impl App {
             recording: false,
             rate: 4,
             screen: 0,
+            pending_screen: None,
             version: None,
             firmware: None,
             flash_confirmed: false,
@@ -289,6 +291,7 @@ impl App {
                     self.log(self.status.clone());
                 }
                 Event::Disconnected => {
+                    self.pending_screen = None;
                     self.scanning_protocols = false;
                     self.protocol_results.clear();
                     self.connecting = false;
@@ -309,10 +312,24 @@ impl App {
                     self.log(self.status.clone());
                 }
                 Event::Screen(screen) => {
+                    if self.screen != screen {
+                        self.screen = screen;
+                        self.status = Message::new(
+                            format!("设备报告的界面编号：{screen}"),
+                            format!("Meter reports screen ID {screen}"),
+                        );
+                        self.log(self.status.clone());
+                    }
+                }
+                Event::ScreenCommandSent(screen) => {
                     self.screen = screen;
+                    let (_, chinese, english) = protocol::SCREENS
+                        .iter()
+                        .find(|(id, _, _)| *id == screen)
+                        .expect("已发送的界面编号应在列表中");
                     self.status = Message::new(
-                        format!("设备报告的界面编号：{screen}"),
-                        format!("Meter reports screen ID {screen}"),
+                        format!("已发送{chinese}指令；检测状态请以仪表显示为准"),
+                        format!("Sent {english} command; check the meter for its actual state"),
                     );
                     self.log(self.status.clone());
                 }
@@ -490,7 +507,7 @@ impl App {
         let plugs_icon = self.icons.plugs.id();
         let plugs_connected_icon = self.icons.plugs_connected.id();
         ui.horizontal(|ui| {
-            ui.heading("ATK UT70");
+            ui.heading(lang.pick("正点原子UT70", "ALIENTEK UT70"));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let tint = ui.visuals().text_color();
                 let icon_size = egui::vec2(20.0, 20.0);
@@ -690,7 +707,11 @@ impl App {
                             },
                         );
                         if selected_screen != self.screen {
-                            let _ = self.commands.send(Command::SetScreen(selected_screen));
+                            if selected_screen == 5 {
+                                self.pending_screen = Some(selected_screen);
+                            } else {
+                                let _ = self.commands.send(Command::SetScreen(selected_screen));
+                            }
                         }
                     });
                 },
@@ -812,6 +833,26 @@ impl App {
         );
     }
 
+    fn secondary_reading_row(
+        ui: &mut egui::Ui,
+        label: &str,
+        value: String,
+        unit: &str,
+        color: egui::Color32,
+    ) {
+        ui.colored_label(color, label);
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(78.0, 18.0), egui::Sense::hover());
+        ui.painter().text(
+            rect.right_center(),
+            egui::Align2::RIGHT_CENTER,
+            value,
+            egui::FontId::monospace(14.0),
+            color,
+        );
+        ui.colored_label(color, unit);
+        ui.end_row();
+    }
+
     fn readings(&self, ui: &mut egui::Ui) {
         let lang = self.language;
         let latest = self.latest();
@@ -869,32 +910,35 @@ impl App {
                                     })
                                 });
                                 egui::Grid::new("secondary_readings")
-                                    .num_columns(2)
-                                    .spacing(egui::vec2(8.0, 1.0))
+                                    .num_columns(3)
+                                    .spacing(egui::vec2(4.0, 1.0))
                                     .show(ui, |ui| {
                                         let dp_color =
                                             Metric::Dp.label_color(ui.visuals().dark_mode);
-                                        ui.colored_label(dp_color, "D+");
-                                        ui.colored_label(
+                                        Self::secondary_reading_row(
+                                            ui,
+                                            "D+",
+                                            latest.map_or("—".into(), |s| format!("{:.4}", s.dp)),
+                                            "V",
                                             dp_color,
-                                            latest.map_or("— V".into(), |s| {
-                                                format!("{:.4} V", s.dp)
-                                            }),
                                         );
-                                        ui.end_row();
                                         let dm_color =
                                             Metric::Dm.label_color(ui.visuals().dark_mode);
-                                        ui.colored_label(dm_color, "D−");
-                                        ui.colored_label(
+                                        Self::secondary_reading_row(
+                                            ui,
+                                            "D−",
+                                            latest.map_or("—".into(), |s| format!("{:.4}", s.dm)),
+                                            "V",
                                             dm_color,
-                                            latest.map_or("— V".into(), |s| {
-                                                format!("{:.4} V", s.dm)
-                                            }),
                                         );
-                                        ui.end_row();
-                                        ui.label(lang.pick("负载电阻", "Load R"));
-                                        ui.label(resistance.as_deref().unwrap_or("—"));
-                                        ui.end_row();
+                                        let text_color = ui.visuals().text_color();
+                                        Self::secondary_reading_row(
+                                            ui,
+                                            lang.pick("负载电阻", "Load R"),
+                                            resistance.unwrap_or_else(|| "—".into()),
+                                            "Ω",
+                                            text_color,
+                                        );
                                     });
                             });
                         });
@@ -1223,6 +1267,35 @@ impl eframe::App for App {
                 .scroll(true)
                 .show(ui.ctx(), |ui| self.flashing_controls(ui));
             self.firmware_dialog_open = open;
+        }
+        if self.pending_screen == Some(5) {
+            let lang = self.language;
+            let response = egui::Modal::new(egui::Id::unique("auto_detection_warning"))
+                .show(ui.ctx(), |ui| {
+                    ui.heading(lang.pick("自动检测警告", "Auto detection warning"));
+                    ui.label(lang.pick(
+                        "自动检测会与供电端握手并可能改变输出电压。请先移除负载，避免损坏连接的设备。",
+                        "Auto detection negotiates with the power source and may change its output voltage. Remove the load first to avoid damaging connected devices.",
+                    ));
+                    ui.horizontal(|ui| {
+                        if ui.button(lang.pick("取消", "Cancel")).clicked() {
+                            ui.close();
+                        }
+                        if ui
+                            .add_enabled(
+                                self.connected && !self.scanning_protocols,
+                                egui::Button::new(lang.pick("已移除负载，继续", "Load removed, continue")),
+                            )
+                            .clicked()
+                        {
+                            let _ = self.commands.send(Command::SetScreen(5));
+                            ui.close();
+                        }
+                    });
+                });
+            if response.should_close() {
+                self.pending_screen = None;
+            }
         }
         ui.ctx()
             .request_repaint_after(if self.connected || self.flashing {
