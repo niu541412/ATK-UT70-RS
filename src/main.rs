@@ -818,7 +818,6 @@ impl App {
                                 lang.pick("负载电阻", "Load R"),
                                 resistance.as_deref().unwrap_or("—")
                             ));
-                            ui.label(format!("{} SPS", self.rate));
                         });
                     });
             });
