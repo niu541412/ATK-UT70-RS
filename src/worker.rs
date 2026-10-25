@@ -173,8 +173,8 @@ pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
                 if screen == 20 {
                     send_error(
                         &tx,
-                        "远程切换 E-Marker 会使仪表白屏，请用仪表按键进入",
-                        "Remote E-Marker switching causes a blank meter screen; use the meter buttons",
+                        "远程切换 E-Marker 会使仪表白屏或重启，请用仪表按键进入",
+                        "Remote E-Marker switching can blank or restart the meter; use the meter buttons",
                     );
                     continue;
                 }
