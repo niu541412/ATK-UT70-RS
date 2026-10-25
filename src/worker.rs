@@ -13,6 +13,7 @@ pub enum Command {
     Disconnect,
     SetRate(u16),
     SetScreen(u8),
+    ScanProtocols,
     StartCsv(PathBuf),
     StopCsv,
     Flash(PathBuf),
@@ -26,6 +27,9 @@ pub enum Event {
     Disconnected,
     Rate(u16),
     Screen(u8),
+    ProtocolScanStarted,
+    ProtocolReport(protocol::ProtocolReport),
+    ProtocolScanFinished,
     Samples(Vec<TimedSample>),
     Recording(bool),
     FlashProgress(usize, usize),
@@ -61,7 +65,18 @@ pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
     let mut rate = 4u16;
     let mut csv: Option<BufWriter<File>> = None;
     let mut last_flush = Instant::now();
+    let mut scan_deadline: Option<Instant> = None;
+    let mut scan_last_report: Option<Instant> = None;
     loop {
+        if let Some(deadline) = scan_deadline {
+            if Instant::now() >= deadline
+                || scan_last_report.is_some_and(|last| last.elapsed() >= Duration::from_secs(18))
+            {
+                scan_deadline = None;
+                scan_last_report = None;
+                let _ = tx.send(Event::ProtocolScanFinished);
+            }
+        }
         match rx.try_recv() {
             Ok(Command::Quit) | Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
             Ok(Command::Connect) => {
@@ -118,6 +133,8 @@ pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
             }
             Ok(Command::Disconnect) => {
                 device = None;
+                scan_deadline = None;
+                scan_last_report = None;
                 if let Some(mut writer) = csv.take() {
                     let _ = writer.flush();
                     let _ = tx.send(Event::Recording(false));
@@ -181,6 +198,25 @@ pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
                     }
                 }
             }
+            Ok(Command::ScanProtocols) => {
+                if scan_deadline.is_some() {
+                    continue;
+                }
+                let result = device
+                    .as_ref()
+                    .ok_or("device is not connected".to_string())
+                    .and_then(|hid| {
+                        write_hid(hid, &protocol::encode(protocol::FAST_CHARGE, &[0; 4])?)
+                    });
+                match result {
+                    Ok(()) => {
+                        scan_deadline = Some(Instant::now() + Duration::from_secs(120));
+                        scan_last_report = None;
+                        let _ = tx.send(Event::ProtocolScanStarted);
+                    }
+                    Err(e) => send_failure(&tx, &e),
+                }
+            }
             Ok(Command::StartCsv(path)) => {
                 if device.is_none() {
                     send_error(&tx, "请先连接设备", "Connect the meter first");
@@ -229,6 +265,8 @@ pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
             }
             Ok(Command::Flash(path)) => {
                 device = None;
+                scan_deadline = None;
+                scan_last_report = None;
                 if let Some(mut writer) = csv.take() {
                     let _ = writer.flush();
                     let _ = tx.send(Event::Recording(false));
@@ -258,6 +296,14 @@ pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
                     match hid.read_timeout(&mut buf, 30) {
                         Ok(0) => {}
                         Ok(n) => {
+                            if let Ok(frame) = protocol::decode(&buf[..n], None) {
+                                if scan_deadline.is_some() {
+                                    if let Ok(report) = protocol::protocol_report(&frame) {
+                                        scan_last_report = Some(Instant::now());
+                                        let _ = tx.send(Event::ProtocolReport(report));
+                                    }
+                                }
+                            }
                             if let Some(batch) = process_sample_report(&buf[..n], rate, start) {
                                 if let Some(writer) = csv.as_mut() {
                                     if let Err(e) = write_csv(writer, &batch) {
@@ -286,6 +332,8 @@ pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
                         }
                         Err(e) => {
                             device = None;
+                            scan_deadline = None;
+                            scan_last_report = None;
                             if let Some(mut writer) = csv.take() {
                                 let _ = writer.flush();
                                 let _ = tx.send(Event::Recording(false));

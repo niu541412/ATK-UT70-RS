@@ -8,7 +8,7 @@ mod worker;
 use eframe::egui;
 use egui_plot::{Legend, Line, Plot};
 use i18n::{Language, Message};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -20,6 +20,7 @@ struct IconTextures {
     plugs_connected: egui::TextureHandle,
     settings: egui::TextureHandle,
     firmware: egui::TextureHandle,
+    protocol_scan: egui::TextureHandle,
     sun: egui::TextureHandle,
     moon: egui::TextureHandle,
 }
@@ -50,6 +51,11 @@ impl IconTextures {
                 ctx,
                 "file-arrow-up",
                 include_bytes!("../assets/icons/file-arrow-up.png"),
+            ),
+            protocol_scan: load(
+                ctx,
+                "list-magnifying-glass",
+                include_bytes!("../assets/icons/list-magnifying-glass.png"),
             ),
             sun: load(ctx, "sun", include_bytes!("../assets/icons/sun.png")),
             moon: load(ctx, "moon", include_bytes!("../assets/icons/moon.png")),
@@ -175,7 +181,20 @@ struct App {
     progress: Option<(usize, usize)>,
     firmware_dialog_open: bool,
     settings_dialog_open: bool,
+    protocol_dialog_open: bool,
+    protocol_panel_expanded_window: bool,
+    selected_protocol: Option<u8>,
+    scanning_protocols: bool,
+    protocol_results: BTreeMap<u8, ProtocolResult>,
+    logs: VecDeque<(String, Message)>,
     trace_visible: [bool; 6],
+}
+
+#[derive(Default)]
+struct ProtocolResult {
+    mask: Option<u32>,
+    description: Option<String>,
+    supported: Option<bool>,
 }
 
 impl App {
@@ -206,6 +225,15 @@ impl App {
             progress: None,
             firmware_dialog_open: false,
             settings_dialog_open: false,
+            protocol_dialog_open: false,
+            protocol_panel_expanded_window: false,
+            selected_protocol: None,
+            scanning_protocols: false,
+            protocol_results: BTreeMap::new(),
+            logs: VecDeque::from([(
+                Self::local_time(),
+                Message::new("正在连接 UT70…", "Connecting to UT70…"),
+            )]),
             trace_visible: [true, true, false, false, false, false],
         }
     }
@@ -213,8 +241,13 @@ impl App {
     fn receive_events(&mut self) {
         while let Ok(event) = self.events.try_recv() {
             match event {
-                Event::Status(message) => self.status = message,
+                Event::Status(message) => {
+                    self.log(message.clone());
+                    self.status = message;
+                }
                 Event::Connected(version, rate, rate_confirmed) => {
+                    self.protocol_results.clear();
+                    self.scanning_protocols = false;
                     self.connecting = false;
                     self.connected = true;
                     self.bootloader = false;
@@ -240,6 +273,7 @@ impl App {
                         )
                     };
                     self.version = version;
+                    self.log(self.status.clone());
                 }
                 Event::Bootloader(version) => {
                     self.connecting = false;
@@ -252,8 +286,11 @@ impl App {
                         "仪表处于升级模式，可选择本地 .atk 固件",
                         "The meter is in upgrade mode. Select a local .atk firmware file.",
                     );
+                    self.log(self.status.clone());
                 }
                 Event::Disconnected => {
+                    self.scanning_protocols = false;
+                    self.protocol_results.clear();
                     self.connecting = false;
                     self.connected = false;
                     self.bootloader = false;
@@ -261,6 +298,7 @@ impl App {
                     self.samples.clear();
                     self.flash_confirmed = false;
                     self.status = Message::new("已断开设备", "Meter disconnected");
+                    self.log(self.status.clone());
                 }
                 Event::Rate(rate) => {
                     self.rate = rate;
@@ -268,6 +306,7 @@ impl App {
                         format!("采样率已设为 {rate} SPS"),
                         format!("Sample rate set to {rate} SPS"),
                     );
+                    self.log(self.status.clone());
                 }
                 Event::Screen(screen) => {
                     self.screen = screen;
@@ -275,6 +314,37 @@ impl App {
                         format!("设备报告的界面编号：{screen}"),
                         format!("Meter reports screen ID {screen}"),
                     );
+                    self.log(self.status.clone());
+                }
+                Event::ProtocolScanStarted => {
+                    self.scanning_protocols = true;
+                    self.protocol_results.clear();
+                    self.status = Message::new("正在检测供电协议…", "Scanning charging protocols…");
+                    self.log(self.status.clone());
+                }
+                Event::ProtocolReport(report) => match report {
+                    protocol::ProtocolReport::Mask { kind, mask } => {
+                        self.protocol_results.entry(kind).or_default().mask = Some(mask);
+                    }
+                    protocol::ProtocolReport::Description {
+                        kind,
+                        supported,
+                        text,
+                    } => {
+                        let summary = text.trim().to_owned();
+                        let result = self.protocol_results.entry(kind).or_default();
+                        result.supported = Some(supported);
+                        result.description = Some(text);
+                        self.log(Message::new(
+                            format!("{}：{summary}", protocol::protocol_name(kind)),
+                            format!("{}: {summary}", protocol::protocol_name(kind)),
+                        ));
+                    }
+                },
+                Event::ProtocolScanFinished => {
+                    self.scanning_protocols = false;
+                    self.status = Message::new("协议检测已结束", "Protocol scan finished");
+                    self.log(self.status.clone());
                 }
                 Event::Samples(batch) => {
                     self.samples.extend(batch);
@@ -289,7 +359,14 @@ impl App {
                         }
                     }
                 }
-                Event::Recording(value) => self.recording = value,
+                Event::Recording(value) => {
+                    self.recording = value;
+                    self.log(if value {
+                        Message::new("CSV 记录已开始", "CSV recording started")
+                    } else {
+                        Message::new("CSV 记录已停止", "CSV recording stopped")
+                    });
+                }
                 Event::FlashProgress(done, total) => self.progress = Some((done, total)),
                 Event::FlashDone => {
                     self.flashing = false;
@@ -300,13 +377,60 @@ impl App {
                         "烧录完成；设备已重启并通过应用版本校验。点击连接开始测量。",
                         "Flashing finished. The meter rebooted and its application version was verified. Select Connect to measure.",
                     );
+                    self.log(self.status.clone());
                 }
                 Event::Error(message) => {
                     self.connecting = false;
                     self.flashing = false;
                     self.status = message;
+                    self.log(self.status.clone());
                 }
             }
+        }
+    }
+
+    fn log(&mut self, message: Message) {
+        self.logs.push_back((Self::local_time(), message));
+        while self.logs.len() > 60 {
+            self.logs.pop_front();
+        }
+    }
+
+    fn local_time() -> String {
+        chrono::Local::now().format("%H:%M:%S").to_string()
+    }
+
+    fn set_protocol_panel(&mut self, ctx: &egui::Context, open: bool) {
+        if self.protocol_dialog_open == open {
+            return;
+        }
+        self.protocol_dialog_open = open;
+        if let Some(rect) = ctx.input(|input| input.viewport().inner_rect) {
+            if open && !self.protocol_panel_expanded_window {
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(
+                    rect.size() + egui::vec2(300.0, 0.0),
+                ));
+                self.protocol_panel_expanded_window = true;
+            } else if !open && self.protocol_panel_expanded_window {
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(
+                    rect.size() - egui::vec2(300.0, 0.0),
+                ));
+                self.protocol_panel_expanded_window = false;
+            }
+        }
+    }
+
+    fn protocol_color(kind: u8) -> egui::Color32 {
+        match kind {
+            0 | 12 => egui::Color32::from_rgb(32, 137, 100), // BC1.2 / Apple
+            1 | 2 => egui::Color32::from_rgb(172, 105, 26),  // QC
+            3 | 4 | 13 => egui::Color32::from_rgb(39, 112, 173), // FCP / SCP / VFCP
+            5 => egui::Color32::from_rgb(126, 75, 166),      // AFC
+            6 | 7 => egui::Color32::from_rgb(158, 73, 139),  // PE
+            8 | 10 => egui::Color32::from_rgb(179, 66, 84),  // VOOC / DASH
+            9 | 11 => egui::Color32::from_rgb(76, 87, 166),  // PD / E-Marker
+            20 => egui::Color32::from_rgb(26, 131, 147),     // UFCS
+            _ => egui::Color32::from_rgb(83, 93, 109),
         }
     }
 
@@ -360,6 +484,7 @@ impl App {
         let lang = self.language;
         let settings_icon = self.icons.settings.id();
         let firmware_icon = self.icons.firmware.id();
+        let protocol_scan_icon = self.icons.protocol_scan.id();
         let sun_icon = self.icons.sun.id();
         let moon_icon = self.icons.moon.id();
         let plugs_icon = self.icons.plugs.id();
@@ -413,6 +538,23 @@ impl App {
                 if firmware.clicked() {
                     self.firmware_dialog_open = true;
                 }
+                let scan = ui
+                    .add(
+                        egui::Button::image(
+                            egui::Image::new((protocol_scan_icon, icon_size)).tint(
+                                if self.protocol_dialog_open {
+                                    egui::Color32::from_rgb(31, 143, 203)
+                                } else {
+                                    tint
+                                },
+                            ),
+                        )
+                        .min_size(button_size),
+                    )
+                    .on_hover_text(lang.pick("协议检测", "Protocol scan"));
+                if scan.clicked() {
+                    self.set_protocol_panel(ui.ctx(), !self.protocol_dialog_open);
+                }
                 let present = self.connected || self.bootloader;
                 let connection_color = if self.connecting {
                     egui::Color32::from_rgb(194, 141, 36)
@@ -449,6 +591,7 @@ impl App {
                         let _ = self.commands.send(Command::Connect);
                         self.connecting = true;
                         self.status = Message::new("正在连接…", "Connecting…");
+                        self.log(self.status.clone());
                     }
                 }
             });
@@ -483,34 +626,44 @@ impl App {
         });
         ui.horizontal(|ui| {
             let mut selected_rate = self.rate;
-            ui.add_enabled_ui(self.connected && !self.flashing && !self.recording, |ui| {
-                egui::ComboBox::from_label(lang.pick("采样率", "Sample rate"))
-                    .selected_text(format!("{} SPS", self.rate))
-                    .show_ui(ui, |ui| {
-                        for rate in protocol::RATES {
-                            ui.selectable_value(&mut selected_rate, rate, format!("{rate} SPS"));
-                        }
-                    });
-            });
+            ui.add_enabled_ui(
+                self.connected && !self.flashing && !self.recording && !self.scanning_protocols,
+                |ui| {
+                    egui::ComboBox::from_label(lang.pick("采样率", "Sample rate"))
+                        .selected_text(format!("{} SPS", self.rate))
+                        .show_ui(ui, |ui| {
+                            for rate in protocol::RATES {
+                                ui.selectable_value(
+                                    &mut selected_rate,
+                                    rate,
+                                    format!("{rate} SPS"),
+                                );
+                            }
+                        });
+                },
+            );
             if selected_rate != self.rate {
                 let _ = self.commands.send(Command::SetRate(selected_rate));
             }
             let mut selected_screen = self.screen;
-            ui.add_enabled_ui(self.connected && !self.flashing && !self.recording, |ui| {
-                egui::ComboBox::from_label(lang.pick("仪表界面", "Meter screen"))
-                    .selected_text(
-                        protocol::SCREENS
-                            .iter()
-                            .find(|(id, _, _)| *id == self.screen)
-                            .map(|(_, zh, en)| lang.pick(zh, en))
-                            .unwrap_or(lang.pick("未知", "Unknown")),
-                    )
-                    .show_ui(ui, |ui| {
-                        for (id, zh, en) in protocol::SCREENS {
-                            ui.selectable_value(&mut selected_screen, *id, lang.pick(zh, en));
-                        }
-                    });
-            });
+            ui.add_enabled_ui(
+                self.connected && !self.flashing && !self.recording && !self.scanning_protocols,
+                |ui| {
+                    egui::ComboBox::from_label(lang.pick("仪表界面", "Meter screen"))
+                        .selected_text(
+                            protocol::SCREENS
+                                .iter()
+                                .find(|(id, _, _)| *id == self.screen)
+                                .map(|(_, zh, en)| lang.pick(zh, en))
+                                .unwrap_or(lang.pick("未知", "Unknown")),
+                        )
+                        .show_ui(ui, |ui| {
+                            for (id, zh, en) in protocol::SCREENS {
+                                ui.selectable_value(&mut selected_screen, *id, lang.pick(zh, en));
+                            }
+                        });
+                },
+            );
             if selected_screen != self.screen {
                 let _ = self.commands.send(Command::SetScreen(selected_screen));
             }
@@ -546,11 +699,42 @@ impl App {
             ("Boot", boot),
             (lang.pick("序列号", "Serial"), serial),
         ];
-        ui.columns(5, |columns| {
-            for (column, (label, value)) in columns.iter_mut().zip(fields) {
-                column.label(egui::RichText::new(label).small());
-                column.label(egui::RichText::new(value).strong());
-            }
+        let width = ui.available_width();
+        let details_width = (width * 0.45).max(380.0).min(width - 250.0);
+        ui.horizontal(|ui| {
+            ui.allocate_ui(egui::vec2(details_width, 91.0), |ui| {
+                ui.columns(3, |columns| {
+                    for (index, (label, value)) in fields.into_iter().enumerate() {
+                        let column = &mut columns[index % 3];
+                        column.label(egui::RichText::new(label).small());
+                        column
+                            .add(egui::Label::new(egui::RichText::new(value).strong()).truncate());
+                    }
+                });
+            });
+            ui.group(|ui| {
+                ui.vertical(|ui| {
+                    ui.set_min_width((width - details_width - 20.0).max(120.0));
+                    ui.label(
+                        egui::RichText::new(lang.pick("日志", "Log"))
+                            .small()
+                            .strong(),
+                    );
+                    egui::ScrollArea::vertical()
+                        .id_salt("event_log")
+                        .max_height(70.0)
+                        .stick_to_bottom(true)
+                        .show(ui, |ui| {
+                            for (clock, message) in &self.logs {
+                                ui.add(
+                                    egui::Label::new(format!("{} {}", clock, message.text(lang)))
+                                        .truncate(),
+                                )
+                                .on_hover_text(message.text(lang));
+                            }
+                        });
+                });
+            });
         });
     }
 
@@ -578,35 +762,66 @@ impl App {
     fn readings(&self, ui: &mut egui::Ui) {
         let lang = self.language;
         let latest = self.latest();
-        ui.columns(3, |columns| {
-            Self::reading(
-                &mut columns[0],
-                lang.pick("电压", "Voltage"),
-                latest.map_or("—".into(), |s| format!("{:.3} V", s.voltage)),
-                egui::Color32::from_rgb(24, 117, 75),
-            );
-            Self::reading(
-                &mut columns[1],
-                lang.pick("电流", "Current"),
-                latest.map_or("—".into(), |s| format!("{:.3} A", s.current)),
-                egui::Color32::from_rgb(168, 51, 65),
-            );
-            Self::reading(
-                &mut columns[2],
-                lang.pick("功率", "Power"),
-                latest.map_or("—".into(), |s| format!("{:.3} W", s.voltage * s.current)),
-                egui::Color32::from_rgb(108, 65, 167),
-            );
-        });
+        let info_width = (ui.available_width() * 0.26).clamp(205.0, 255.0);
+        let cards_width = ui.available_width() - info_width - 8.0;
         ui.horizontal(|ui| {
-            ui.colored_label(
-                Metric::Dp.label_color(ui.visuals().dark_mode),
-                latest.map_or("D+ — V".into(), |s| format!("D+ {:.4} V", s.dp)),
-            );
-            ui.colored_label(
-                Metric::Dm.label_color(ui.visuals().dark_mode),
-                latest.map_or("D− — V".into(), |s| format!("D− {:.4} V", s.dm)),
-            );
+            ui.allocate_ui(egui::vec2(cards_width, 94.0), |ui| {
+                ui.columns(3, |columns| {
+                    Self::reading(
+                        &mut columns[0],
+                        lang.pick("电压", "Voltage"),
+                        latest.map_or("—".into(), |s| format!("{:.3} V", s.voltage)),
+                        egui::Color32::from_rgb(24, 117, 75),
+                    );
+                    Self::reading(
+                        &mut columns[1],
+                        lang.pick("电流", "Current"),
+                        latest.map_or("—".into(), |s| format!("{:.3} A", s.current)),
+                        egui::Color32::from_rgb(168, 51, 65),
+                    );
+                    Self::reading(
+                        &mut columns[2],
+                        lang.pick("功率", "Power"),
+                        latest.map_or("—".into(), |s| format!("{:.3} W", s.voltage * s.current)),
+                        egui::Color32::from_rgb(108, 65, 167),
+                    );
+                });
+            });
+            ui.allocate_ui(egui::vec2(info_width, 94.0), |ui| {
+                egui::Frame::new()
+                    .fill(if ui.visuals().dark_mode {
+                        egui::Color32::from_rgb(38, 47, 61)
+                    } else {
+                        egui::Color32::from_rgb(233, 239, 246)
+                    })
+                    .corner_radius(10.0)
+                    .inner_margin(9.0)
+                    .show(ui, |ui| {
+                        ui.vertical(|ui| {
+                            ui.set_min_width(info_width - 18.0);
+                            ui.set_min_height(76.0);
+                            ui.spacing_mut().item_spacing.y = 1.0;
+                            ui.colored_label(
+                                Metric::Dp.label_color(ui.visuals().dark_mode),
+                                latest.map_or("D+ — V".into(), |s| format!("D+ {:.4} V", s.dp)),
+                            );
+                            ui.colored_label(
+                                Metric::Dm.label_color(ui.visuals().dark_mode),
+                                latest.map_or("D− — V".into(), |s| format!("D− {:.4} V", s.dm)),
+                            );
+                            let resistance = latest.and_then(|sample| {
+                                (sample.current > 0.001)
+                                    .then(|| format!("{:.1} Ω", sample.voltage / sample.current))
+                            });
+                            ui.label(format!(
+                                "{} {}",
+                                lang.pick("负载电阻", "Load R"),
+                                resistance.as_deref().unwrap_or("—")
+                            ));
+                            ui.label(format!("{} SPS", self.rate));
+                        });
+                    });
+            });
         });
     }
 
@@ -729,6 +944,122 @@ impl App {
             ));
         }
     }
+
+    fn protocol_panel(&mut self, ui: &mut egui::Ui) {
+        let lang = self.language;
+        ui.horizontal(|ui| {
+            ui.heading(lang.pick("协议检测", "Protocol scan"));
+            if ui
+                .button("×")
+                .on_hover_text(lang.pick("收起", "Close"))
+                .clicked()
+            {
+                self.set_protocol_panel(ui.ctx(), false);
+            }
+        });
+        ui.label(if self.scanning_protocols {
+            lang.pick("正在逐项检测…", "Scanning protocols…")
+        } else if self.protocol_results.is_empty() {
+            lang.pick("等待检测", "Waiting for scan")
+        } else {
+            lang.pick("本次供电端的检测结果", "Results for this source")
+        });
+        egui::Frame::new()
+            .fill(if ui.visuals().dark_mode {
+                egui::Color32::from_rgb(90, 62, 24)
+            } else {
+                egui::Color32::from_rgb(255, 237, 192)
+            })
+            .corner_radius(6.0)
+            .inner_margin(8.0)
+            .show(ui, |ui| {
+                ui.label(lang.pick(
+                    "⚠ 开始前请移除负载；检测会改变供电电压，带载检测可能损坏设备。",
+                    "⚠ Remove the load first. Scanning changes the supply voltage and may damage a connected load.",
+                ));
+            });
+        if ui
+            .add_enabled(
+                self.connected && !self.scanning_protocols,
+                egui::Button::new(if self.protocol_results.is_empty() {
+                    lang.pick("开始检测", "Start scan")
+                } else {
+                    lang.pick("重新检测", "Scan again")
+                }),
+            )
+            .clicked()
+        {
+            let _ = self.commands.send(Command::ScanProtocols);
+        }
+        ui.separator();
+        egui::Grid::new("protocol_tiles")
+            .spacing([6.0, 6.0])
+            .show(ui, |ui| {
+                for (index, kind) in protocol::PROTOCOL_TYPES.iter().copied().enumerate() {
+                    let result = self.protocol_results.get(&kind);
+                    let supported = result.and_then(|item| item.supported);
+                    let fill = match supported {
+                        Some(true) => Self::protocol_color(kind),
+                        Some(false) => egui::Color32::WHITE,
+                        None if ui.visuals().dark_mode => egui::Color32::from_rgb(67, 77, 90),
+                        None => egui::Color32::from_rgb(213, 221, 229),
+                    };
+                    let text_color = if supported == Some(true)
+                        || (supported.is_none() && ui.visuals().dark_mode)
+                    {
+                        egui::Color32::WHITE
+                    } else {
+                        egui::Color32::from_rgb(46, 55, 63)
+                    };
+                    let state = match supported {
+                        Some(true) => lang.pick("已发现", "Found"),
+                        Some(false) => lang.pick("未发现", "Absent"),
+                        None if self.scanning_protocols => lang.pick("待检测", "Pending"),
+                        None => lang.pick("未上报", "No report"),
+                    };
+                    let label = format!("{}\n{}", protocol::protocol_name(kind), state);
+                    let selected = self.selected_protocol == Some(kind);
+                    let button =
+                        egui::Button::new(egui::RichText::new(label).color(text_color).size(11.0))
+                            .fill(fill)
+                            .stroke(if selected {
+                                egui::Stroke::new(2.0, egui::Color32::from_rgb(27, 105, 186))
+                            } else {
+                                egui::Stroke::new(1.0, egui::Color32::from_gray(156))
+                            });
+                    if ui.add_sized([82.0, 50.0], button).clicked() {
+                        self.selected_protocol = Some(kind);
+                    }
+                    if index % 3 == 2 {
+                        ui.end_row();
+                    }
+                }
+            });
+        ui.separator();
+        if let Some(kind) = self.selected_protocol {
+            ui.heading(protocol::protocol_name(kind));
+            if let Some(result) = self.protocol_results.get(&kind) {
+                ui.label(match result.supported {
+                    Some(true) => lang.pick("检测到支持", "Supported"),
+                    Some(false) => lang.pick("未检测到支持", "Not detected"),
+                    None => lang.pick("等待结果", "Waiting for result"),
+                });
+                if let Some(description) = &result.description {
+                    ui.label(description.trim());
+                }
+                if let Some(mask) = result.mask {
+                    ui.label(format!("Mask: 0x{mask:08X}"));
+                }
+            } else {
+                ui.label(lang.pick("尚无结果", "No result yet"));
+            }
+        } else {
+            ui.label(lang.pick(
+                "点击协议方块查看详细档位",
+                "Select a tile for details and voltage ranges",
+            ));
+        }
+    }
 }
 
 impl eframe::App for App {
@@ -738,8 +1069,17 @@ impl eframe::App for App {
             ui.ctx()
                 .send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
+        if self.protocol_dialog_open {
+            egui::Panel::right("protocol_scan_panel")
+                .resizable(false)
+                .default_size(292.0)
+                .min_size(292.0)
+                .max_size(292.0)
+                .show(ui, |ui| self.protocol_panel(ui));
+        }
         egui::Panel::top("main_header")
             .resizable(false)
+            .show_separator_line(false)
             .show(ui, |ui| self.header(ui));
         egui::Panel::bottom("resource_links")
             .resizable(false)

@@ -10,6 +10,8 @@ license = "GPL-3.0-only"
 eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "system_fonts", "x11", "wayland"] }
 egui_plot = "0.38"
 hidapi = "2.6"
+encoding_rs = "0.8"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 rfd = "0.17"
 
 [build-dependencies]

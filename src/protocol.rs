@@ -6,6 +6,9 @@ pub const VERSION: u8 = 0x02;
 pub const FACE: u8 = 0x03;
 pub const CV_DATA: u8 = 0x08;
 pub const FREQUENCY: u8 = 0x70;
+pub const FAST_CHARGE: u8 = 0x20;
+pub const FAST_CHARGE_DESCRIPTION: u8 = 0x21;
+pub const PROTOCOL_TYPES: [u8; 15] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 20];
 pub const RATES: [u16; 6] = [4, 10, 50, 200, 500, 1000];
 pub const SCREENS: &[(u8, &str, &str)] = &[
     (0, "基本测量", "Basic measurement"),
@@ -40,6 +43,58 @@ pub struct VersionInfo {
     pub boot_mode: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProtocolReport {
+    Mask {
+        kind: u8,
+        mask: u32,
+    },
+    Description {
+        kind: u8,
+        supported: bool,
+        text: String,
+    },
+}
+
+pub fn protocol_report(frame: &Frame) -> Result<ProtocolReport, String> {
+    match frame.command {
+        FAST_CHARGE if frame.payload.len() >= 6 => Ok(ProtocolReport::Mask {
+            kind: frame.payload[1],
+            mask: u32::from_le_bytes(frame.payload[2..6].try_into().unwrap()),
+        }),
+        FAST_CHARGE_DESCRIPTION if frame.payload.len() >= 2 => {
+            let (decoded, _, _) = encoding_rs::GBK.decode(&frame.payload[2..]);
+            Ok(ProtocolReport::Description {
+                kind: frame.payload[0],
+                supported: frame.payload[1] == 1,
+                text: decoded.trim_end_matches('\0').to_owned(),
+            })
+        }
+        _ => Err("not a supported protocol scan report".into()),
+    }
+}
+
+pub fn protocol_name(kind: u8) -> &'static str {
+    match kind {
+        0 => "BC1.2",
+        1 => "QC 2.0",
+        2 => "QC 3.0",
+        3 => "FCP",
+        4 => "SCP",
+        5 => "AFC",
+        6 => "PE 1.0",
+        7 => "PE 2.0",
+        8 => "VOOC",
+        9 => "PD",
+        10 => "DASH",
+        11 => "E-Marker",
+        12 => "Apple 2.4A",
+        13 => "VFCP",
+        20 => "UFCS",
+        _ => "Unknown",
+    }
+}
+
 pub fn encode(command: u8, payload: &[u8]) -> Result<[u8; 65], String> {
     if payload.len() > 59 {
         return Err("application payload exceeds 59 bytes".into());
@@ -67,13 +122,24 @@ pub fn decode(report: &[u8], expected: Option<(u8, u8)>) -> Result<Frame, String
         return Err("missing application frame header".into());
     }
     let n = data[2] as usize;
-    let check_at = 3 + n;
+    let mut check_at = 3 + n;
     if check_at >= data.len() {
         return Err("truncated application frame".into());
     }
-    let computed = data[..check_at]
+    let mut computed = data[..check_at]
         .iter()
         .fold(0u8, |acc, x| acc.wrapping_add(*x));
+    // 实机 0x21 文本帧的长度字段比实际载荷少 1；仅在下一字节校验成立时接受。
+    if data[1] == FAST_CHARGE_DESCRIPTION && data[check_at] != computed {
+        let longer = check_at + 1;
+        if longer < data.len() {
+            let next_sum = computed.wrapping_add(data[check_at]);
+            if data[longer] == next_sum {
+                check_at = longer;
+                computed = next_sum;
+            }
+        }
+    }
     let special_rate_reply = expected.is_some_and(|(cmd, sent_checksum)| {
         cmd == FREQUENCY && data[1] == cmd && data[check_at] == sent_checksum
     });
@@ -188,5 +254,33 @@ mod tests {
         let points = samples(&decoded, 4).unwrap();
         assert_eq!(points[0].voltage, 5.0);
         assert_eq!(points[0].current, 1.0);
+    }
+
+    #[test]
+    fn protocol_scan_frames_match_windows_capture() {
+        let request = encode(FAST_CHARGE, &[0; 4]).unwrap();
+        assert_eq!(&request[1..10], &[0xEE, 0x20, 4, 0, 0, 0, 0, 0x12, 0xFF]);
+
+        let description = [
+            0xEE, 0x21, 0x0E, 9, 0, b'P', b'D', b' ', b'n', b'o', b't', b' ', b'e', b'x', b'i',
+            b't', 13, 10, 0x1C, 0xFF,
+        ];
+        assert_eq!(
+            protocol_report(&decode(&description, None).unwrap()).unwrap(),
+            ProtocolReport::Description {
+                kind: 9,
+                supported: false,
+                text: "PD not exit\r\n".into()
+            }
+        );
+
+        let mask = [0xEE, 0x20, 7, 0, 3, 0x84, 0x48, 0, 0, 1, 0xE5, 0xFF];
+        assert_eq!(
+            protocol_report(&decode(&mask, None).unwrap()).unwrap(),
+            ProtocolReport::Mask {
+                kind: 3,
+                mask: 0x0000_4884
+            }
+        );
     }
 }

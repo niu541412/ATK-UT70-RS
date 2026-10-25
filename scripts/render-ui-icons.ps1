@@ -8,7 +8,7 @@ if (-not (Test-Path -LiteralPath $edge)) { throw 'Microsoft Edge not found.' }
 
 $work = Join-Path $env:TEMP 'ut70-icon-render'
 New-Item -ItemType Directory -Path $work -Force | Out-Null
-foreach ($name in @('plugs', 'plugs-connected', 'gear-six', 'file-arrow-up', 'sun', 'moon')) {
+foreach ($name in @('plugs', 'plugs-connected', 'gear-six', 'file-arrow-up', 'list-magnifying-glass', 'sun', 'moon')) {
     $svg = Get-Content -LiteralPath (Join-Path $icons "$name.svg") -Encoding UTF8 -Raw
     $html = '<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;padding:0;width:96px;height:96px;background:#fff}svg{display:block;width:96px;height:96px;color:#000}</style></head><body>' + $svg + '</body></html>'
     $page = Join-Path $work "$name.html"
