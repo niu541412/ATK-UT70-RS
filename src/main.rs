@@ -3,11 +3,13 @@
 mod firmware;
 mod i18n;
 mod protocol;
+mod settings;
 mod worker;
 
 use eframe::egui;
-use egui_plot::{Legend, Line, Plot};
+use egui_plot::{CoordinatesFormatter, Corner, Legend, Line, Plot};
 use i18n::{Language, Message};
+use settings::Settings;
 use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -166,6 +168,10 @@ struct App {
     events: Receiver<Event>,
     icons: IconTextures,
     samples: VecDeque<TimedSample>,
+    chart_origin: Option<f64>,
+    paused: bool,
+    window_secs: u16,
+    cursor_values: bool,
     status: Message,
     language: Language,
     connecting: bool,
@@ -201,6 +207,12 @@ struct ProtocolResult {
 impl App {
     fn new(ctx: &egui::Context) -> Self {
         configure_fonts(ctx);
+        let settings = Settings::load();
+        ctx.set_theme(if settings.dark_mode {
+            egui::Theme::Dark
+        } else {
+            egui::Theme::Light
+        });
         let (command_tx, command_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
         std::thread::spawn(move || worker::run(command_rx, event_tx));
@@ -211,8 +223,12 @@ impl App {
             events: event_rx,
             icons: IconTextures::new(ctx),
             samples: VecDeque::new(),
+            chart_origin: None,
+            paused: false,
+            window_secs: settings.window_secs,
+            cursor_values: settings.cursor_values,
             status: Message::new("正在连接 UT70…", "Connecting to UT70…"),
-            language: Language::Chinese,
+            language: settings.language,
             connecting: true,
             connected: false,
             bootloader: false,
@@ -248,6 +264,9 @@ impl App {
                     self.status = message;
                 }
                 Event::Connected(version, rate, rate_confirmed) => {
+                    self.samples.clear();
+                    self.chart_origin = None;
+                    self.paused = false;
                     self.protocol_results.clear();
                     self.scanning_protocols = false;
                     self.connecting = false;
@@ -282,6 +301,8 @@ impl App {
                     self.connected = false;
                     self.bootloader = true;
                     self.samples.clear();
+                    self.chart_origin = None;
+                    self.paused = false;
                     self.flash_confirmed = false;
                     self.version = Some(version);
                     self.status = Message::new(
@@ -299,6 +320,8 @@ impl App {
                     self.bootloader = false;
                     self.version = None;
                     self.samples.clear();
+                    self.chart_origin = None;
+                    self.paused = false;
                     self.flash_confirmed = false;
                     self.status = Message::new("已断开设备", "Meter disconnected");
                     self.log(self.status.clone());
@@ -365,9 +388,15 @@ impl App {
                     self.log(self.status.clone());
                 }
                 Event::Samples(batch) => {
+                    if self.paused {
+                        continue;
+                    }
+                    if self.chart_origin.is_none() {
+                        self.chart_origin = batch.first().map(|item| item.seconds);
+                    }
                     self.samples.extend(batch);
                     if let Some(last) = self.samples.back() {
-                        let threshold = last.seconds - 60.0;
+                        let threshold = last.seconds - 600.0;
                         while self
                             .samples
                             .front()
@@ -418,6 +447,26 @@ impl App {
         chrono::Local::now().format("%H:%M:%S").to_string()
     }
 
+    fn save_settings(&self, ctx: &egui::Context) {
+        Settings {
+            language: self.language,
+            dark_mode: ctx.theme() == egui::Theme::Dark,
+            cursor_values: self.cursor_values,
+            window_secs: self.window_secs,
+        }
+        .save();
+    }
+
+    fn restart_measurement(&mut self) {
+        self.samples.clear();
+        self.chart_origin = None;
+        self.paused = false;
+        self.log(Message::new(
+            "曲线已重新开始；CSV 记录不受影响",
+            "Chart restarted; CSV recording continues",
+        ));
+    }
+
     fn set_protocol_panel(&mut self, ctx: &egui::Context, open: bool) {
         if self.protocol_dialog_open == open {
             return;
@@ -465,13 +514,26 @@ impl App {
 
     fn chart_points(&self, metric: Metric) -> Vec<[f64; 2]> {
         // 每条曲线最多绘制约 2000 个点；CSV 仍记录收到的全部测量点。
-        let width = self.samples.len().div_ceil(1000).max(1);
-        let values: Vec<_> = self.samples.iter().collect();
-        let mut out = Vec::with_capacity(values.len().min(2000));
-        for bucket in values.chunks(width) {
-            let mut valid = bucket
-                .iter()
-                .filter_map(|item| metric.value(&item.sample).map(|value| (*item, value)));
+        let Some(last) = self.samples.back() else {
+            return Vec::new();
+        };
+        let start = lower_bound_time(&self.samples, last.seconds - self.window_secs as f64);
+        let width = (self.samples.len() - start).div_ceil(1000).max(1);
+        let mut out = Vec::with_capacity((self.samples.len() - start).min(2000));
+        let origin = self.chart_origin.unwrap_or(0.0);
+        if let Some((item, value)) = self
+            .samples
+            .range(start..)
+            .find_map(|item| metric.value(&item.sample).map(|value| (item, value)))
+        {
+            out.push([item.seconds - origin, value]);
+        }
+        for index in (start..self.samples.len()).step_by(width) {
+            let bucket = self
+                .samples
+                .range(index..(index + width).min(self.samples.len()));
+            let mut valid =
+                bucket.filter_map(|item| metric.value(&item.sample).map(|value| (item, value)));
             let Some((mut low, mut low_value)) = valid.next() else {
                 continue;
             };
@@ -497,9 +559,23 @@ impl App {
             } else {
                 low
             };
-            out.push([first.seconds, metric.value(&first.sample).unwrap()]);
+            out.push([first.seconds - origin, metric.value(&first.sample).unwrap()]);
             if first.seconds != second.seconds {
-                out.push([second.seconds, metric.value(&second.sample).unwrap()]);
+                out.push([
+                    second.seconds - origin,
+                    metric.value(&second.sample).unwrap(),
+                ]);
+            }
+        }
+        if let Some((item, value)) = self
+            .samples
+            .iter()
+            .rev()
+            .find_map(|item| metric.value(&item.sample).map(|value| (item, value)))
+        {
+            let point = [item.seconds - origin, value];
+            if out.last().is_none_or(|previous| previous[0] < point[0]) {
+                out.push(point);
             }
         }
         out
@@ -546,11 +622,12 @@ impl App {
                         lang.pick("切换到深色模式", "Switch to dark mode")
                     });
                 if theme.clicked() {
-                    ui.ctx().set_visuals(if dark {
-                        egui::Visuals::light()
+                    ui.ctx().set_theme(if dark {
+                        egui::Theme::Light
                     } else {
-                        egui::Visuals::dark()
+                        egui::Theme::Dark
                     });
+                    self.save_settings(ui.ctx());
                 }
                 let firmware = ui
                     .add(
@@ -636,28 +713,59 @@ impl App {
                     ui.horizontal(|ui| {
                         if ui
                             .add_enabled(
-                                self.connected && !self.recording,
-                                egui::Button::new(
-                                    lang.pick("开始 CSV 记录", "Start CSV recording"),
-                                ),
+                                self.connected,
+                                egui::Button::new(lang.pick("重新开始", "Restart")),
+                            )
+                            .on_hover_text(lang.pick(
+                                "清空曲线并重新计时；CSV 记录继续进行",
+                                "Clear the chart and restart its clock; CSV recording continues",
+                            ))
+                            .clicked()
+                        {
+                            self.restart_measurement();
+                        }
+                        if ui
+                            .add_enabled(
+                                self.connected,
+                                egui::Button::new(if self.paused {
+                                    lang.pick("继续", "Resume")
+                                } else {
+                                    lang.pick("暂停", "Pause")
+                                }),
+                            )
+                            .on_hover_text(lang.pick(
+                                "只暂停界面显示；CSV 仍会记录收到的所有采样点",
+                                "Pause the display only; CSV continues recording every sample",
+                            ))
+                            .clicked()
+                        {
+                            self.paused = !self.paused;
+                            self.log(if self.paused {
+                                Message::new("显示已暂停", "Display paused")
+                            } else {
+                                Message::new("显示已继续", "Display resumed")
+                            });
+                        }
+                        ui.add(egui::Separator::default().vertical().spacing(12.0));
+                        if ui
+                            .add_enabled(
+                                self.connected || self.recording,
+                                egui::Button::new(if self.recording {
+                                    lang.pick("停止 CSV 记录", "Stop CSV recording")
+                                } else {
+                                    lang.pick("开始 CSV 记录", "Start CSV recording")
+                                }),
                             )
                             .clicked()
                         {
-                            if let Some(path) = rfd::FileDialog::new()
+                            if self.recording {
+                                let _ = self.commands.send(Command::StopCsv);
+                            } else if let Some(path) = rfd::FileDialog::new()
                                 .add_filter("CSV", &["csv"])
                                 .save_file()
                             {
                                 let _ = self.commands.send(Command::StartCsv(path));
                             }
-                        }
-                        if ui
-                            .add_enabled(
-                                self.recording,
-                                egui::Button::new(lang.pick("停止记录", "Stop recording")),
-                            )
-                            .clicked()
-                        {
-                            let _ = self.commands.send(Command::StopCsv);
                         }
                     });
                     ui.add_space(7.0);
@@ -696,6 +804,8 @@ impl App {
                             |ui| {
                                 ui.label(lang.pick("仪表界面", "Meter screen"));
                                 egui::ComboBox::from_id_salt("meter_screen")
+                                    .width(170.0)
+                                    .height(280.0)
                                     .selected_text({
                                         let (zh, en) = protocol::screen_names(self.screen);
                                         lang.pick(zh, en)
@@ -961,8 +1071,8 @@ impl App {
                                                 egui::Color32::from_rgb(0, 140, 129)
                                             },
                                             Some(lang.pick(
-                                                "最近 1 秒电压采样的峰峰值；说明书建议使用 1000 SPS。仅供辅助分析。",
-                                                "Peak-to-peak voltage over the latest 1 second. The manual recommends 1000 SPS. For reference only.",
+                                                "最近 1 秒电压采样的峰峰值。仪表最高只有 1000 SPS，充电器的高频开关纹波可能采不到，显示值可能与实际纹波相差较大。仅供参考。",
+                                                "Peak-to-peak voltage from the latest 1 second of samples. The meter tops out at 1000 SPS, so high-frequency switching ripple from chargers may be missed and the reading may differ greatly from the actual ripple. For reference only.",
                                             )),
                                         );
                                     });
@@ -987,23 +1097,68 @@ impl App {
         let visible = self.trace_visible;
         let dark_mode = ui.visuals().dark_mode;
         let plot_height = (ui.available_height() - 8.0).max(150.0);
-        Plot::new("measurements_plot")
+        let mut plot = Plot::new("measurements_plot")
             .width(ui.available_width())
             .height(plot_height)
             .legend(Legend::default())
             .x_axis_label(lang.pick("秒", "Seconds"))
-            .y_axis_label(lang.pick("数值（单位见图例）", "Value (units in legend)"))
-            .show(ui, |plot| {
-                for (index, metric) in Metric::ALL.iter().enumerate() {
-                    if visible[index] {
-                        plot.line(
-                            Line::new(metric.title(lang), self.chart_points(*metric))
-                                .color(metric.label_color(dark_mode))
-                                .width(2.0),
-                        );
+            .y_axis_label(lang.pick("数值", "Value"))
+            .set_margin_fraction(egui::vec2(0.0, 0.05))
+            .allow_drag(false)
+            .allow_zoom(false)
+            .allow_scroll(false)
+            .show_crosshair(self.cursor_values);
+        if self.cursor_values {
+            let samples = &self.samples;
+            let origin = self.chart_origin.unwrap_or(0.0);
+            plot = plot.coordinates_formatter(
+                Corner::LeftTop,
+                CoordinatesFormatter::new(move |point, _| {
+                    let Some(item) = closest_sample(samples, point.x + origin) else {
+                        return String::new();
+                    };
+                    let mut text = format!("{:.3} s", item.seconds - origin);
+                    for (index, metric) in Metric::ALL.iter().enumerate() {
+                        if visible[index] {
+                            if let Some(value) = metric.value(&item.sample) {
+                                let decimals = match metric {
+                                    Metric::Dp | Metric::Dm => 4,
+                                    Metric::Resistance => 1,
+                                    _ => 3,
+                                };
+                                text.push_str(&format!(
+                                    "\n{}: {value:.decimals$}",
+                                    metric.title(lang)
+                                ));
+                            }
+                        }
                     }
+                    text
+                }),
+            );
+        }
+        let end = self
+            .samples
+            .back()
+            .map_or(0.1, |last| last.seconds - self.chart_origin.unwrap_or(0.0));
+        let start = (end - self.window_secs as f64).max(0.0);
+        let response = plot.show(ui, |plot| {
+            plot.set_plot_bounds_x(start..=end.max(start + 0.1));
+            for (index, metric) in Metric::ALL.iter().enumerate() {
+                if visible[index] {
+                    plot.line(
+                        Line::new(metric.title(lang), self.chart_points(*metric))
+                            .color(metric.label_color(dark_mode))
+                            .width(2.0),
+                    );
                 }
-            });
+            }
+        });
+        if self.cursor_values {
+            response
+                .response
+                .on_hover_cursor(egui::CursorIcon::Crosshair);
+        }
     }
 
     fn flashing_controls(&mut self, ui: &mut egui::Ui) {
@@ -1241,13 +1396,22 @@ impl eframe::App for App {
                             .pick("UT70 官方资料", "Official UT70 resources"),
                         "https://www.openedv.com/docs/tool/USB/usb.html",
                     );
-                    if self.started_at.elapsed() < Duration::from_secs(5) {
-                        let hint = self.language.pick(
-                            "曲线显示最近 60 秒。负载电阻按 V/I 计算，它不是线阻。CSV 记录全部测量点。",
-                            "Charts show the latest 60 seconds. Load resistance is V/I, not cable resistance. CSV stores all samples.",
-                        );
-                        ui.add(egui::Label::new(egui::RichText::new(hint).small()).truncate())
-                            .on_hover_text(hint);
+                    let hint = self.language.pick(
+                        "负载电阻按 V/I 计算，它不是线阻。CSV 记录全部测量点。",
+                        "Load resistance is V/I, not cable resistance. CSV stores all samples.",
+                    );
+                    let age = self.started_at.elapsed().as_secs_f32();
+                    let opacity = ((5.0 - age) / 2.0).clamp(0.0, 1.0);
+                    let response = ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(hint)
+                                .small()
+                                .color(ui.visuals().weak_text_color().linear_multiply(opacity)),
+                        )
+                        .truncate(),
+                    );
+                    if opacity > 0.0 {
+                        response.on_hover_text(hint);
                     }
                 });
             });
@@ -1260,6 +1424,7 @@ impl eframe::App for App {
                 .open(&mut open)
                 .default_width(280.0)
                 .show(ui.ctx(), |ui| {
+                    let old_language = self.language;
                     egui::ComboBox::from_label(self.language.pick("语言", "Language"))
                         .selected_text(match self.language {
                             Language::Chinese => "简体中文",
@@ -1269,6 +1434,32 @@ impl eframe::App for App {
                             ui.selectable_value(&mut self.language, Language::Chinese, "简体中文");
                             ui.selectable_value(&mut self.language, Language::English, "English");
                         });
+                    let mut changed = self.language != old_language;
+                    ui.horizontal(|ui| {
+                        ui.label(self.language.pick("横轴时间范围", "Time range"));
+                        egui::ComboBox::from_id_salt("time_window")
+                            .selected_text(format!("{} s", self.window_secs))
+                            .show_ui(ui, |ui| {
+                                for seconds in settings::WINDOWS {
+                                    changed |= ui
+                                        .selectable_value(
+                                            &mut self.window_secs,
+                                            seconds,
+                                            format!("{seconds} s"),
+                                        )
+                                        .changed();
+                                }
+                            });
+                    });
+                    changed |= ui
+                        .checkbox(
+                            &mut self.cursor_values,
+                            self.language.pick("显示光标处数值", "Show cursor values"),
+                        )
+                        .changed();
+                    if changed {
+                        self.save_settings(ui.ctx());
+                    }
                     ui.separator();
                     ui.label(format!("ATK UT70 RS v{}", env!("CARGO_PKG_VERSION")));
                     ui.label(self.language.pick(
@@ -1345,6 +1536,35 @@ impl eframe::App for App {
     }
 }
 
+fn lower_bound_time(samples: &VecDeque<TimedSample>, seconds: f64) -> usize {
+    let (mut left, mut right) = (0, samples.len());
+    while left < right {
+        let middle = left + (right - left) / 2;
+        if samples[middle].seconds < seconds {
+            left = middle + 1;
+        } else {
+            right = middle;
+        }
+    }
+    left
+}
+
+fn closest_sample(samples: &VecDeque<TimedSample>, seconds: f64) -> Option<&TimedSample> {
+    let next = lower_bound_time(samples, seconds);
+    match (next.checked_sub(1), samples.get(next)) {
+        (Some(previous), Some(after)) => {
+            let before = &samples[previous];
+            if (seconds - before.seconds).abs() <= (after.seconds - seconds).abs() {
+                Some(before)
+            } else {
+                Some(after)
+            }
+        }
+        (Some(previous), None) => samples.get(previous),
+        (None, after) => after,
+    }
+}
+
 // 最近 1 秒电压采样的峰峰值，仅供参考，并非仪表模拟带宽内的完整纹波测量。
 fn ripple_vpp_mv(samples: &VecDeque<TimedSample>) -> Option<f64> {
     let end = samples.back()?.seconds;
@@ -1385,6 +1605,8 @@ mod ripple_tests {
             });
         }
         assert!((ripple_vpp_mv(&samples).unwrap() - 30.0).abs() < 0.01);
+        assert_eq!(lower_bound_time(&samples, 1.25), 2);
+        assert_eq!(closest_sample(&samples, 1.4).unwrap().seconds, 1.5);
         samples.truncate(1);
         assert_eq!(ripple_vpp_mv(&samples), None);
     }
