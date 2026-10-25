@@ -10,6 +10,7 @@ use egui_plot::{Legend, Line, Plot};
 use i18n::{Language, Message};
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 use worker::{Command, Event, TimedSample};
@@ -19,6 +20,8 @@ struct IconTextures {
     plugs_connected: egui::TextureHandle,
     settings: egui::TextureHandle,
     firmware: egui::TextureHandle,
+    sun: egui::TextureHandle,
+    moon: egui::TextureHandle,
 }
 
 impl IconTextures {
@@ -48,8 +51,37 @@ impl IconTextures {
                 "file-arrow-up",
                 include_bytes!("../assets/icons/file-arrow-up.png"),
             ),
+            sun: load(ctx, "sun", include_bytes!("../assets/icons/sun.png")),
+            moon: load(ctx, "moon", include_bytes!("../assets/icons/moon.png")),
         }
     }
+}
+
+fn configure_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    let mut inter = egui::FontData::from_static(include_bytes!("../assets/fonts/Inter.ttf"));
+    inter.tweak.coords.push(b"wght", 540.0);
+    fonts.font_data.insert("Inter".into(), Arc::new(inter));
+    fonts
+        .families
+        .get_mut(&egui::FontFamily::Proportional)
+        .expect("内置比例字体系列应存在")
+        .insert(0, "Inter".into());
+    ctx.set_fonts(fonts);
+    ctx.all_styles_mut(|style| {
+        style
+            .text_styles
+            .insert(egui::TextStyle::Small, egui::FontId::proportional(11.0));
+        style
+            .text_styles
+            .insert(egui::TextStyle::Body, egui::FontId::proportional(14.0));
+        style
+            .text_styles
+            .insert(egui::TextStyle::Button, egui::FontId::proportional(14.0));
+        style
+            .text_styles
+            .insert(egui::TextStyle::Heading, egui::FontId::proportional(20.0));
+    });
 }
 
 #[derive(Clone, Copy)]
@@ -147,6 +179,7 @@ struct App {
 
 impl App {
     fn new(ctx: &egui::Context) -> Self {
+        configure_fonts(ctx);
         let (command_tx, command_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
         std::thread::spawn(move || worker::run(command_rx, event_tx));
@@ -325,6 +358,8 @@ impl App {
         let lang = self.language;
         let settings_icon = self.icons.settings.id();
         let firmware_icon = self.icons.firmware.id();
+        let sun_icon = self.icons.sun.id();
+        let moon_icon = self.icons.moon.id();
         let plugs_icon = self.icons.plugs.id();
         let plugs_connected_icon = self.icons.plugs_connected.id();
         ui.horizontal(|ui| {
@@ -343,6 +378,27 @@ impl App {
                     .on_hover_text(lang.pick("设置", "Settings"));
                 if settings.clicked() {
                     self.settings_dialog_open = true;
+                }
+                let dark = ui.visuals().dark_mode;
+                let theme = ui
+                    .add(
+                        egui::Button::image(
+                            egui::Image::new((if dark { sun_icon } else { moon_icon }, icon_size))
+                                .tint(tint),
+                        )
+                        .min_size(button_size),
+                    )
+                    .on_hover_text(if dark {
+                        lang.pick("切换到浅色模式", "Switch to light mode")
+                    } else {
+                        lang.pick("切换到深色模式", "Switch to dark mode")
+                    });
+                if theme.clicked() {
+                    ui.ctx().set_visuals(if dark {
+                        egui::Visuals::light()
+                    } else {
+                        egui::Visuals::dark()
+                    });
                 }
                 let firmware = ui
                     .add(
@@ -490,7 +546,7 @@ impl App {
         ];
         ui.columns(5, |columns| {
             for (column, (label, value)) in columns.iter_mut().zip(fields) {
-                column.label(egui::RichText::new(label).small().weak());
+                column.label(egui::RichText::new(label).small());
                 column.label(egui::RichText::new(value).strong());
             }
         });

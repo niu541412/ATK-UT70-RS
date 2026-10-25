@@ -86,7 +86,10 @@ jobs:
           cp AppIcon.iconset/icon_512x512.png AppIcon.iconset/icon_256x256@2x.png
           iconutil -c icns AppIcon.iconset -o ATK-UT70-RS.app/Contents/Resources/AppIcon.icns
           chmod +x ATK-UT70-RS.app/Contents/MacOS/atk-ut70-rs
-          zip -qry "dist/ATK-UT70-RS-macos-${{ matrix.arch }}.zip" ATK-UT70-RS.app
+          codesign --force --deep --sign - ATK-UT70-RS.app
+          codesign --verify --deep --strict --verbose=2 ATK-UT70-RS.app
+          ditto -c -k --sequesterRsrc --keepParent ATK-UT70-RS.app "dist/ATK-UT70-RS-macos-${{ matrix.arch }}.zip"
+          unzip -tq "dist/ATK-UT70-RS-macos-${{ matrix.arch }}.zip"
       - name: Package Linux AppImage
         if: matrix.platform == 'linux'
         shell: bash
