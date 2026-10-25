@@ -695,34 +695,17 @@ impl App {
                                     })
                                     .show_ui(ui, |ui| {
                                         for (id, zh, en) in protocol::SCREENS {
-                                            if *id == 20 {
-                                                ui.add_enabled_ui(false, |ui| {
-                                                    ui.selectable_value(
-                                                        &mut selected_screen,
-                                                        *id,
-                                                        format!(
-                                                            "{} · {}",
-                                                            lang.pick(zh, en),
-                                                            lang.pick(
-                                                                "请用仪表按键",
-                                                                "meter button only"
-                                                            )
-                                                        ),
-                                                    );
-                                                });
-                                            } else {
-                                                ui.selectable_value(
-                                                    &mut selected_screen,
-                                                    *id,
-                                                    lang.pick(zh, en),
-                                                );
-                                            }
+                                            ui.selectable_value(
+                                                &mut selected_screen,
+                                                *id,
+                                                lang.pick(zh, en),
+                                            );
                                         }
                                     });
                             },
                         );
                         if selected_screen != self.screen {
-                            if selected_screen == 5 {
+                            if matches!(selected_screen, 5 | 20) {
                                 self.pending_screen = Some(selected_screen);
                             } else {
                                 let _ = self.commands.send(Command::SetScreen(selected_screen));
@@ -920,9 +903,8 @@ impl App {
                                 ui.set_min_height(76.0);
                                 ui.spacing_mut().item_spacing.y = 1.0;
                                 let resistance = latest.and_then(|sample| {
-                                    (sample.current > 0.001).then(|| {
-                                        format!("{:.1} Ω", sample.voltage / sample.current)
-                                    })
+                                    (sample.current > 0.001)
+                                        .then(|| format!("{:.1}", sample.voltage / sample.current))
                                 });
                                 egui::Grid::new("secondary_readings")
                                     .num_columns(3)
@@ -1283,15 +1265,23 @@ impl eframe::App for App {
                 .show(ui.ctx(), |ui| self.flashing_controls(ui));
             self.firmware_dialog_open = open;
         }
-        if self.pending_screen == Some(5) {
+        if let Some(screen) = self.pending_screen {
             let lang = self.language;
-            let response = egui::Modal::new(egui::Id::unique("auto_detection_warning"))
+            let response = egui::Modal::new(egui::Id::unique("screen_switch_warning"))
                 .show(ui.ctx(), |ui| {
-                    ui.heading(lang.pick("自动检测警告", "Auto detection warning"));
-                    ui.label(lang.pick(
-                        "自动检测会与供电端握手并可能改变输出电压。请先移除负载，避免损坏连接的设备。",
-                        "Auto detection negotiates with the power source and may change its output voltage. Remove the load first to avoid damaging connected devices.",
-                    ));
+                    if screen == 20 {
+                        ui.heading(lang.pick("E-Marker 远程切换警告", "E-Marker switching warning"));
+                        ui.label(lang.pick(
+                            "远程切换 E-Marker（编号 20）曾使仪表立即显示 END 后白屏，也曾导致仪表自行重启。确认你可以手动恢复仪表后再继续。",
+                            "Remote E-Marker switching (screen 20) has caused an immediate END screen followed by a blank display, and has also restarted the meter. Continue only if you can recover it manually.",
+                        ));
+                    } else {
+                        ui.heading(lang.pick("自动检测警告", "Auto detection warning"));
+                        ui.label(lang.pick(
+                            "自动检测会与供电端握手并可能改变输出电压。请先移除负载，避免损坏连接的设备。",
+                            "Auto detection negotiates with the power source and may change its output voltage. Remove the load first to avoid damaging connected devices.",
+                        ));
+                    }
                     ui.horizontal(|ui| {
                         if ui.button(lang.pick("取消", "Cancel")).clicked() {
                             ui.close();
@@ -1299,11 +1289,15 @@ impl eframe::App for App {
                         if ui
                             .add_enabled(
                                 self.connected && !self.scanning_protocols,
-                                egui::Button::new(lang.pick("已移除负载，继续", "Load removed, continue")),
+                                egui::Button::new(if screen == 20 {
+                                    lang.pick("确认发送", "Send anyway")
+                                } else {
+                                    lang.pick("已移除负载，继续", "Load removed, continue")
+                                }),
                             )
                             .clicked()
                         {
-                            let _ = self.commands.send(Command::SetScreen(5));
+                            let _ = self.commands.send(Command::SetScreen(screen));
                             ui.close();
                         }
                     });
