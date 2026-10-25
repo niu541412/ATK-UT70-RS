@@ -863,27 +863,39 @@ impl App {
                                 ui.set_min_width(info_width - 18.0);
                                 ui.set_min_height(76.0);
                                 ui.spacing_mut().item_spacing.y = 1.0;
-                                ui.colored_label(
-                                    Metric::Dp.label_color(ui.visuals().dark_mode),
-                                    latest
-                                        .map_or("D+ — V".into(), |s| format!("D+ {:.4} V", s.dp)),
-                                );
-                                ui.colored_label(
-                                    Metric::Dm.label_color(ui.visuals().dark_mode),
-                                    latest.map_or("D− — V".into(), |s| {
-                                        format!("D− {:.4} V", s.dm)
-                                    }),
-                                );
                                 let resistance = latest.and_then(|sample| {
                                     (sample.current > 0.001).then(|| {
                                         format!("{:.1} Ω", sample.voltage / sample.current)
                                     })
                                 });
-                                ui.label(format!(
-                                    "{} {}",
-                                    lang.pick("负载电阻", "Load R"),
-                                    resistance.as_deref().unwrap_or("—")
-                                ));
+                                egui::Grid::new("secondary_readings")
+                                    .num_columns(2)
+                                    .spacing(egui::vec2(8.0, 1.0))
+                                    .show(ui, |ui| {
+                                        let dp_color =
+                                            Metric::Dp.label_color(ui.visuals().dark_mode);
+                                        ui.colored_label(dp_color, "D+");
+                                        ui.colored_label(
+                                            dp_color,
+                                            latest.map_or("— V".into(), |s| {
+                                                format!("{:.4} V", s.dp)
+                                            }),
+                                        );
+                                        ui.end_row();
+                                        let dm_color =
+                                            Metric::Dm.label_color(ui.visuals().dark_mode);
+                                        ui.colored_label(dm_color, "D−");
+                                        ui.colored_label(
+                                            dm_color,
+                                            latest.map_or("— V".into(), |s| {
+                                                format!("{:.4} V", s.dm)
+                                            }),
+                                        );
+                                        ui.end_row();
+                                        ui.label(lang.pick("负载电阻", "Load R"));
+                                        ui.label(resistance.as_deref().unwrap_or("—"));
+                                        ui.end_row();
+                                    });
                             });
                         });
                 },
@@ -1142,6 +1154,12 @@ impl eframe::App for App {
             .resizable(false)
             .show(ui, |ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
+                            .small()
+                            .weak(),
+                    );
+                    ui.label("·");
                     ui.hyperlink_to(
                         self.language.pick("GitHub 仓库", "GitHub repository"),
                         "https://github.com/niu541412/ATK-UT70-RS",
