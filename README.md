@@ -33,6 +33,8 @@ cargo run --release
 
 Linux 还需要 `libudev-dev`、`libxkbcommon-dev`、`libwayland-dev`、X11、GTK3 和 DBus 的开发包；具体安装命令见 [GitHub Actions 工作流](.github/workflows/build.yml)。Windows 需要 MSVC C++ Build Tools。
 
+在本机 Windows x64 构建并把可执行文件复制到外层 `UT70` 目录，可运行 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-local-windows-x64.ps1`；输出文件名为 `ATK-UT70-RS-windows-x86_64.exe`。
+
 ## 使用范围
 
 - 测量：4、10、50、200、500、1000 SPS；电压、电流和功率以大字显示，六条可选曲线共用一个图表，以颜色及单位区分。负载电阻为 `V/I`，电流不高于 1 mA 时不绘制；它不是仪表“线阻模式”的线阻。每个收到的测量点写入 CSV，曲线降低绘图点数以控制占用。

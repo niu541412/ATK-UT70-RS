@@ -538,20 +538,16 @@ impl App {
                 egui::Color32::from_rgb(108, 65, 167),
             );
         });
-        if let Some(s) = latest {
-            ui.horizontal(|ui| {
-                ui.colored_label(
-                    Metric::Dp.label_color(ui.visuals().dark_mode),
-                    format!("D+ {:.4} V", s.dp),
-                );
-                ui.colored_label(
-                    Metric::Dm.label_color(ui.visuals().dark_mode),
-                    format!("D− {:.4} V", s.dm),
-                );
-            });
-        } else {
-            ui.label(lang.pick("暂无测量数据", "No measurement data yet"));
-        }
+        ui.horizontal(|ui| {
+            ui.colored_label(
+                Metric::Dp.label_color(ui.visuals().dark_mode),
+                latest.map_or("D+ — V".into(), |s| format!("D+ {:.4} V", s.dp)),
+            );
+            ui.colored_label(
+                Metric::Dm.label_color(ui.visuals().dark_mode),
+                latest.map_or("D− — V".into(), |s| format!("D− {:.4} V", s.dm)),
+            );
+        });
     }
 
     fn plots(&mut self, ui: &mut egui::Ui) {
