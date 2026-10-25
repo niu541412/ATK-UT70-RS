@@ -743,6 +743,22 @@ impl eframe::App for App {
         egui::Panel::top("main_header")
             .resizable(false)
             .show(ui, |ui| self.header(ui));
+        egui::Panel::bottom("resource_links")
+            .resizable(false)
+            .show(ui, |ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.hyperlink_to(
+                        self.language.pick("GitHub 仓库", "GitHub repository"),
+                        "https://github.com/niu541412/ATK-UT70-RS",
+                    );
+                    ui.label("·");
+                    ui.hyperlink_to(
+                        self.language
+                            .pick("UT70 官方资料", "Official UT70 resources"),
+                        "https://www.openedv.com/docs/tool/USB/usb.html",
+                    );
+                });
+            });
         egui::CentralPanel::default().show(ui, |ui| {
             self.plots(ui);
         });

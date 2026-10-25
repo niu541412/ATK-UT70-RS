@@ -6,6 +6,8 @@
 
 项目代码及文档采用 [GPL-3.0-only](LICENSE)；Phosphor 图标和 Inter 字体分别保留各自的 [MIT](assets/icons/LICENSE.phosphor) 与 [SIL OFL 1.1](assets/fonts/OFL.Inter.txt) 许可。下载包附带许可证文本，完整源码位于此仓库对应版本的 Git 标签。
 
+界面右下角可打开本项目 GitHub 仓库和[正点原子 UT70 官方资料页](https://www.openedv.com/docs/tool/USB/usb.html)。
+
 ## 下载与运行
 
 GitHub Actions 的 **Build desktop client** 工作流为以下架构生成独立产物，见每次构建的 Artifacts：
