@@ -697,11 +697,28 @@ impl App {
                                     )
                                     .show_ui(ui, |ui| {
                                         for (id, zh, en) in protocol::SCREENS {
-                                            ui.selectable_value(
-                                                &mut selected_screen,
-                                                *id,
-                                                lang.pick(zh, en),
-                                            );
+                                            if *id == 20 {
+                                                ui.add_enabled_ui(false, |ui| {
+                                                    ui.selectable_value(
+                                                        &mut selected_screen,
+                                                        *id,
+                                                        format!(
+                                                            "{} · {}",
+                                                            lang.pick(zh, en),
+                                                            lang.pick(
+                                                                "请用仪表按键",
+                                                                "meter button only"
+                                                            )
+                                                        ),
+                                                    );
+                                                });
+                                            } else {
+                                                ui.selectable_value(
+                                                    &mut selected_screen,
+                                                    *id,
+                                                    lang.pick(zh, en),
+                                                );
+                                            }
                                         }
                                     });
                             },

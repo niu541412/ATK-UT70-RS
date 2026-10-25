@@ -163,6 +163,14 @@ pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
                 }
             }
             Ok(Command::SetScreen(screen)) => {
+                if screen == 20 {
+                    send_error(
+                        &tx,
+                        "远程切换 E-Marker 会使仪表白屏，请用仪表按键进入",
+                        "Remote E-Marker switching causes a blank meter screen; use the meter buttons",
+                    );
+                    continue;
+                }
                 if !protocol::SCREENS.iter().any(|(id, _, _)| *id == screen) {
                     send_error(
                         &tx,
@@ -171,7 +179,7 @@ pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
                     );
                     continue;
                 }
-                if matches!(screen, 4 | 5 | 20) {
+                if matches!(screen, 4 | 5) {
                     let result = device
                         .as_ref()
                         .ok_or("device is not connected".to_string())
