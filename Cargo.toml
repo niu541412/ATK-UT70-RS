@@ -7,7 +7,7 @@ repository = "https://github.com/niu541412/ATK-UT70-RS"
 license = "GPL-3.0-only"
 
 [dependencies]
-eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "system_fonts", "x11", "wayland"] }
+eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "system_fonts", "links", "x11", "wayland"] }
 egui_plot = "0.38"
 hidapi = "2.6"
 encoding_rs = "0.8"

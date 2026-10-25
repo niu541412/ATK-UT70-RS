@@ -598,75 +598,108 @@ impl App {
         });
         ui.add(egui::Label::new(self.status.text(lang)).truncate())
             .on_hover_text(self.status.text(lang));
-        self.device_details(ui);
+        let total_width = ui.available_width();
+        let controls_width = (total_width * 0.58).max(440.0).min(total_width - 260.0);
+        let log_width = total_width - controls_width - 8.0;
         ui.horizontal(|ui| {
-            if ui
-                .add_enabled(
-                    self.connected && !self.recording,
-                    egui::Button::new(lang.pick("开始 CSV 记录", "Start CSV recording")),
-                )
-                .clicked()
-            {
-                if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("CSV", &["csv"])
-                    .save_file()
-                {
-                    let _ = self.commands.send(Command::StartCsv(path));
-                }
-            }
-            if ui
-                .add_enabled(
-                    self.recording,
-                    egui::Button::new(lang.pick("停止记录", "Stop recording")),
-                )
-                .clicked()
-            {
-                let _ = self.commands.send(Command::StopCsv);
-            }
-        });
-        ui.horizontal(|ui| {
-            let mut selected_rate = self.rate;
-            ui.add_enabled_ui(
-                self.connected && !self.flashing && !self.recording && !self.scanning_protocols,
+            ui.allocate_ui_with_layout(
+                egui::vec2(controls_width, 151.0),
+                egui::Layout::top_down(egui::Align::Min),
                 |ui| {
-                    egui::ComboBox::from_label(lang.pick("采样率", "Sample rate"))
-                        .selected_text(format!("{} SPS", self.rate))
-                        .show_ui(ui, |ui| {
-                            for rate in protocol::RATES {
-                                ui.selectable_value(
-                                    &mut selected_rate,
-                                    rate,
-                                    format!("{rate} SPS"),
-                                );
+                    self.device_details(ui);
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(
+                                self.connected && !self.recording,
+                                egui::Button::new(
+                                    lang.pick("开始 CSV 记录", "Start CSV recording"),
+                                ),
+                            )
+                            .clicked()
+                        {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("CSV", &["csv"])
+                                .save_file()
+                            {
+                                let _ = self.commands.send(Command::StartCsv(path));
                             }
-                        });
+                        }
+                        if ui
+                            .add_enabled(
+                                self.recording,
+                                egui::Button::new(lang.pick("停止记录", "Stop recording")),
+                            )
+                            .clicked()
+                        {
+                            let _ = self.commands.send(Command::StopCsv);
+                        }
+                    });
+                    ui.add_space(7.0);
+                    ui.horizontal(|ui| {
+                        let mut selected_rate = self.rate;
+                        ui.add_enabled_ui(
+                            self.connected
+                                && !self.flashing
+                                && !self.recording
+                                && !self.scanning_protocols,
+                            |ui| {
+                                ui.label(lang.pick("采样率", "Sample rate"));
+                                egui::ComboBox::from_id_salt("sample_rate")
+                                    .selected_text(format!("{} SPS", self.rate))
+                                    .show_ui(ui, |ui| {
+                                        for rate in protocol::RATES {
+                                            ui.selectable_value(
+                                                &mut selected_rate,
+                                                rate,
+                                                format!("{rate} SPS"),
+                                            );
+                                        }
+                                    });
+                            },
+                        );
+                        if selected_rate != self.rate {
+                            let _ = self.commands.send(Command::SetRate(selected_rate));
+                        }
+                        ui.add(egui::Separator::default().vertical().spacing(15.0));
+                        let mut selected_screen = self.screen;
+                        ui.add_enabled_ui(
+                            self.connected
+                                && !self.flashing
+                                && !self.recording
+                                && !self.scanning_protocols,
+                            |ui| {
+                                ui.label(lang.pick("仪表界面", "Meter screen"));
+                                egui::ComboBox::from_id_salt("meter_screen")
+                                    .selected_text(
+                                        protocol::SCREENS
+                                            .iter()
+                                            .find(|(id, _, _)| *id == self.screen)
+                                            .map(|(_, zh, en)| lang.pick(zh, en))
+                                            .unwrap_or(lang.pick("未知", "Unknown")),
+                                    )
+                                    .show_ui(ui, |ui| {
+                                        for (id, zh, en) in protocol::SCREENS {
+                                            ui.selectable_value(
+                                                &mut selected_screen,
+                                                *id,
+                                                lang.pick(zh, en),
+                                            );
+                                        }
+                                    });
+                            },
+                        );
+                        if selected_screen != self.screen {
+                            let _ = self.commands.send(Command::SetScreen(selected_screen));
+                        }
+                    });
                 },
             );
-            if selected_rate != self.rate {
-                let _ = self.commands.send(Command::SetRate(selected_rate));
-            }
-            let mut selected_screen = self.screen;
-            ui.add_enabled_ui(
-                self.connected && !self.flashing && !self.recording && !self.scanning_protocols,
-                |ui| {
-                    egui::ComboBox::from_label(lang.pick("仪表界面", "Meter screen"))
-                        .selected_text(
-                            protocol::SCREENS
-                                .iter()
-                                .find(|(id, _, _)| *id == self.screen)
-                                .map(|(_, zh, en)| lang.pick(zh, en))
-                                .unwrap_or(lang.pick("未知", "Unknown")),
-                        )
-                        .show_ui(ui, |ui| {
-                            for (id, zh, en) in protocol::SCREENS {
-                                ui.selectable_value(&mut selected_screen, *id, lang.pick(zh, en));
-                            }
-                        });
-                },
+            ui.allocate_ui_with_layout(
+                egui::vec2(log_width, 151.0),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| self.event_log(ui, log_width, 151.0),
             );
-            if selected_screen != self.screen {
-                let _ = self.commands.send(Command::SetScreen(selected_screen));
-            }
         });
         ui.add_space(6.0);
         self.readings(ui);
@@ -692,50 +725,70 @@ impl App {
         });
         let boot = version.map_or("—".into(), |v| v.bootloader.to_string());
         let serial = version.map_or("—".into(), |v| v.serial.clone());
+        let active_protocol = if self.connected {
+            lang.pick("未识别", "Unknown")
+        } else {
+            "—"
+        };
         let fields = [
             (lang.pick("状态", "Status"), mode.to_owned()),
             (lang.pick("硬件", "Hardware"), hardware),
             (lang.pick("应用", "Application"), application),
             ("Boot", boot),
             (lang.pick("序列号", "Serial"), serial),
+            (
+                lang.pick("当前协议", "Active protocol"),
+                active_protocol.to_owned(),
+            ),
         ];
-        let width = ui.available_width();
-        let details_width = (width * 0.45).max(380.0).min(width - 250.0);
-        ui.horizontal(|ui| {
-            ui.allocate_ui(egui::vec2(details_width, 91.0), |ui| {
-                ui.columns(3, |columns| {
-                    for (index, (label, value)) in fields.into_iter().enumerate() {
-                        let column = &mut columns[index % 3];
-                        column.label(egui::RichText::new(label).small());
-                        column
-                            .add(egui::Label::new(egui::RichText::new(value).strong()).truncate());
-                    }
-                });
-            });
-            ui.group(|ui| {
-                ui.vertical(|ui| {
-                    ui.set_min_width((width - details_width - 20.0).max(120.0));
-                    ui.label(
-                        egui::RichText::new(lang.pick("日志", "Log"))
-                            .small()
-                            .strong(),
+        ui.columns(3, |columns| {
+            for (index, (label, value)) in fields.into_iter().enumerate() {
+                let column = &mut columns[index % 3];
+                let label_response = column.label(egui::RichText::new(label).small());
+                let value_response = column.add(
+                    egui::Label::new(egui::RichText::new(value).strong()).truncate(),
+                );
+                if index == 5 {
+                    let hint = lang.pick(
+                        "普通测量帧未上报正在使用的协议；扫描结果只是可用协议列表。",
+                        "Measurement frames do not report the active protocol; scan results list supported protocols.",
                     );
-                    egui::ScrollArea::vertical()
-                        .id_salt("event_log")
-                        .max_height(70.0)
-                        .stick_to_bottom(true)
-                        .show(ui, |ui| {
-                            for (clock, message) in &self.logs {
-                                ui.add(
-                                    egui::Label::new(format!("{} {}", clock, message.text(lang)))
-                                        .truncate(),
-                                )
-                                .on_hover_text(message.text(lang));
-                            }
-                        });
-                });
+                    label_response.on_hover_text(hint);
+                    value_response.on_hover_text(hint);
+                }
+            }
+        });
+    }
+
+    fn event_log(&self, ui: &mut egui::Ui, width: f32, height: f32) {
+        let lang = self.language;
+        let group = ui.group(|ui| {
+            ui.vertical(|ui| {
+                ui.set_min_width(width - 18.0);
+                ui.set_min_height(height - 18.0);
+                ui.add_space(10.0);
+                egui::ScrollArea::vertical()
+                    .id_salt("event_log")
+                    .max_height(height - 31.0)
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        for (clock, message) in &self.logs {
+                            ui.add(
+                                egui::Label::new(format!("{} {}", clock, message.text(lang)))
+                                    .truncate(),
+                            )
+                            .on_hover_text(message.text(lang));
+                        }
+                    });
             });
         });
+        ui.painter().text(
+            group.response.rect.right_top() + egui::vec2(-8.0, 5.0),
+            egui::Align2::RIGHT_TOP,
+            lang.pick("日志", "Log"),
+            egui::FontId::proportional(11.0),
+            ui.visuals().weak_text_color(),
+        );
     }
 
     fn reading(ui: &mut egui::Ui, title: &str, value: String, color: egui::Color32) {
@@ -765,62 +818,76 @@ impl App {
         let info_width = (ui.available_width() * 0.26).clamp(205.0, 255.0);
         let cards_width = ui.available_width() - info_width - 8.0;
         ui.horizontal(|ui| {
-            ui.allocate_ui(egui::vec2(cards_width, 94.0), |ui| {
-                ui.columns(3, |columns| {
-                    Self::reading(
-                        &mut columns[0],
-                        lang.pick("电压", "Voltage"),
-                        latest.map_or("—".into(), |s| format!("{:.3} V", s.voltage)),
-                        egui::Color32::from_rgb(24, 117, 75),
-                    );
-                    Self::reading(
-                        &mut columns[1],
-                        lang.pick("电流", "Current"),
-                        latest.map_or("—".into(), |s| format!("{:.3} A", s.current)),
-                        egui::Color32::from_rgb(168, 51, 65),
-                    );
-                    Self::reading(
-                        &mut columns[2],
-                        lang.pick("功率", "Power"),
-                        latest.map_or("—".into(), |s| format!("{:.3} W", s.voltage * s.current)),
-                        egui::Color32::from_rgb(108, 65, 167),
-                    );
-                });
-            });
-            ui.allocate_ui(egui::vec2(info_width, 94.0), |ui| {
-                egui::Frame::new()
-                    .fill(if ui.visuals().dark_mode {
-                        egui::Color32::from_rgb(38, 47, 61)
-                    } else {
-                        egui::Color32::from_rgb(233, 239, 246)
-                    })
-                    .corner_radius(10.0)
-                    .inner_margin(9.0)
-                    .show(ui, |ui| {
-                        ui.vertical(|ui| {
-                            ui.set_min_width(info_width - 18.0);
-                            ui.set_min_height(76.0);
-                            ui.spacing_mut().item_spacing.y = 1.0;
-                            ui.colored_label(
-                                Metric::Dp.label_color(ui.visuals().dark_mode),
-                                latest.map_or("D+ — V".into(), |s| format!("D+ {:.4} V", s.dp)),
-                            );
-                            ui.colored_label(
-                                Metric::Dm.label_color(ui.visuals().dark_mode),
-                                latest.map_or("D− — V".into(), |s| format!("D− {:.4} V", s.dm)),
-                            );
-                            let resistance = latest.and_then(|sample| {
-                                (sample.current > 0.001)
-                                    .then(|| format!("{:.1} Ω", sample.voltage / sample.current))
-                            });
-                            ui.label(format!(
-                                "{} {}",
-                                lang.pick("负载电阻", "Load R"),
-                                resistance.as_deref().unwrap_or("—")
-                            ));
-                        });
+            ui.allocate_ui_with_layout(
+                egui::vec2(cards_width, 94.0),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.columns(3, |columns| {
+                        Self::reading(
+                            &mut columns[0],
+                            lang.pick("电压", "Voltage"),
+                            latest.map_or("—".into(), |s| format!("{:.3} V", s.voltage)),
+                            egui::Color32::from_rgb(24, 117, 75),
+                        );
+                        Self::reading(
+                            &mut columns[1],
+                            lang.pick("电流", "Current"),
+                            latest.map_or("—".into(), |s| format!("{:.3} A", s.current)),
+                            egui::Color32::from_rgb(168, 51, 65),
+                        );
+                        Self::reading(
+                            &mut columns[2],
+                            lang.pick("功率", "Power"),
+                            latest.map_or("—".into(), |s| {
+                                format!("{:.3} W", s.voltage * s.current)
+                            }),
+                            egui::Color32::from_rgb(108, 65, 167),
+                        );
                     });
-            });
+                },
+            );
+            ui.allocate_ui_with_layout(
+                egui::vec2(info_width, 94.0),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    egui::Frame::new()
+                        .fill(if ui.visuals().dark_mode {
+                            egui::Color32::from_rgb(38, 47, 61)
+                        } else {
+                            egui::Color32::from_rgb(233, 239, 246)
+                        })
+                        .corner_radius(10.0)
+                        .inner_margin(9.0)
+                        .show(ui, |ui| {
+                            ui.vertical(|ui| {
+                                ui.set_min_width(info_width - 18.0);
+                                ui.set_min_height(76.0);
+                                ui.spacing_mut().item_spacing.y = 1.0;
+                                ui.colored_label(
+                                    Metric::Dp.label_color(ui.visuals().dark_mode),
+                                    latest
+                                        .map_or("D+ — V".into(), |s| format!("D+ {:.4} V", s.dp)),
+                                );
+                                ui.colored_label(
+                                    Metric::Dm.label_color(ui.visuals().dark_mode),
+                                    latest.map_or("D− — V".into(), |s| {
+                                        format!("D− {:.4} V", s.dm)
+                                    }),
+                                );
+                                let resistance = latest.and_then(|sample| {
+                                    (sample.current > 0.001).then(|| {
+                                        format!("{:.1} Ω", sample.voltage / sample.current)
+                                    })
+                                });
+                                ui.label(format!(
+                                    "{} {}",
+                                    lang.pick("负载电阻", "Load R"),
+                                    resistance.as_deref().unwrap_or("—")
+                                ));
+                            });
+                        });
+                },
+            );
         });
     }
 
@@ -946,16 +1013,7 @@ impl App {
 
     fn protocol_panel(&mut self, ui: &mut egui::Ui) {
         let lang = self.language;
-        ui.horizontal(|ui| {
-            ui.heading(lang.pick("协议检测", "Protocol scan"));
-            if ui
-                .button("×")
-                .on_hover_text(lang.pick("收起", "Close"))
-                .clicked()
-            {
-                self.set_protocol_panel(ui.ctx(), false);
-            }
-        });
+        ui.heading(lang.pick("协议检测", "Protocol scan"));
         ui.label(if self.scanning_protocols {
             lang.pick("正在逐项检测…", "Scanning protocols…")
         } else if self.protocol_results.is_empty() {
@@ -1096,8 +1154,8 @@ impl eframe::App for App {
                     );
                     if self.started_at.elapsed() < Duration::from_secs(5) {
                         let hint = self.language.pick(
-                            "曲线显示最近 60 秒。负载电阻按 V/I 计算，仅在电流高于 1 mA 时绘制；它不是线阻。CSV 记录全部测量点。",
-                            "Charts show the latest 60 seconds. Load resistance is V/I and appears only above 1 mA; it is not cable resistance. CSV stores all samples.",
+                            "曲线显示最近 60 秒。负载电阻按 V/I 计算，它不是线阻。CSV 记录全部测量点。",
+                            "Charts show the latest 60 seconds. Load resistance is V/I, not cable resistance. CSV stores all samples.",
                         );
                         ui.add(egui::Label::new(egui::RichText::new(hint).small()).truncate())
                             .on_hover_text(hint);
