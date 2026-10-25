@@ -128,7 +128,7 @@ impl Metric {
             Self::Power => egui::Color32::from_rgb(170, 105, 235),
             Self::Dp => egui::Color32::from_rgb(70, 190, 235),
             Self::Dm => egui::Color32::from_rgb(240, 160, 65),
-            Self::Resistance => egui::Color32::from_rgb(225, 205, 75),
+            Self::Resistance => egui::Color32::from_rgb(232, 236, 241),
         }
     }
 
@@ -142,7 +142,7 @@ impl Metric {
             Self::Power => egui::Color32::from_rgb(104, 58, 166),
             Self::Dp => egui::Color32::from_rgb(25, 111, 169),
             Self::Dm => egui::Color32::from_rgb(167, 91, 15),
-            Self::Resistance => egui::Color32::from_rgb(132, 108, 12),
+            Self::Resistance => egui::Color32::BLACK,
         }
     }
 
@@ -316,8 +316,8 @@ impl App {
                         self.screen = screen;
                         let (chinese, english) = protocol::screen_names(screen);
                         self.status = Message::new(
-                            format!("设备报告的界面：{chinese}（{screen}）"),
-                            format!("Meter reports screen: {english} ({screen})"),
+                            format!("设备报告的界面：{chinese}"),
+                            format!("Meter reports screen: {english}"),
                         );
                         self.log(self.status.clone());
                     }
@@ -454,6 +454,13 @@ impl App {
 
     fn latest(&self) -> Option<protocol::Sample> {
         self.samples.back().map(|item| item.sample)
+    }
+
+    fn ripple_vpp_mv(&self) -> Option<f64> {
+        if !self.connected {
+            return None;
+        }
+        ripple_vpp_mv(&self.samples)
     }
 
     fn chart_points(&self, metric: Metric) -> Vec<[f64; 2]> {
@@ -837,8 +844,12 @@ impl App {
         value: String,
         unit: &str,
         color: egui::Color32,
+        hint: Option<&str>,
     ) {
-        ui.colored_label(color, label);
+        let label_response = ui.colored_label(color, label);
+        if let Some(hint) = hint {
+            label_response.on_hover_text(hint);
+        }
         let (rect, _) = ui.allocate_exact_size(egui::vec2(78.0, 18.0), egui::Sense::hover());
         ui.painter().text(
             rect.right_center(),
@@ -896,11 +907,11 @@ impl App {
                             egui::Color32::from_rgb(233, 239, 246)
                         })
                         .corner_radius(10.0)
-                        .inner_margin(9.0)
+                        .inner_margin(6.0)
                         .show(ui, |ui| {
                             ui.vertical(|ui| {
-                                ui.set_min_width(info_width - 18.0);
-                                ui.set_min_height(76.0);
+                                ui.set_min_width(info_width - 12.0);
+                                ui.set_min_height(82.0);
                                 ui.spacing_mut().item_spacing.y = 1.0;
                                 let resistance = latest.and_then(|sample| {
                                     (sample.current > 0.001)
@@ -918,6 +929,7 @@ impl App {
                                             latest.map_or("—".into(), |s| format!("{:.4}", s.dp)),
                                             "V",
                                             dp_color,
+                                            None,
                                         );
                                         let dm_color =
                                             Metric::Dm.label_color(ui.visuals().dark_mode);
@@ -927,14 +939,31 @@ impl App {
                                             latest.map_or("—".into(), |s| format!("{:.4}", s.dm)),
                                             "V",
                                             dm_color,
+                                            None,
                                         );
-                                        let text_color = ui.visuals().text_color();
                                         Self::secondary_reading_row(
                                             ui,
                                             lang.pick("负载电阻", "Load R"),
                                             resistance.unwrap_or_else(|| "—".into()),
                                             "Ω",
-                                            text_color,
+                                            Metric::Resistance.label_color(ui.visuals().dark_mode),
+                                            None,
+                                        );
+                                        Self::secondary_reading_row(
+                                            ui,
+                                            lang.pick("纹波(参考)", "Ripple (ref.)"),
+                                            self.ripple_vpp_mv()
+                                                .map_or("—".into(), |value| format!("{value:.1}")),
+                                            "mV",
+                                            if ui.visuals().dark_mode {
+                                                egui::Color32::from_rgb(61, 214, 192)
+                                            } else {
+                                                egui::Color32::from_rgb(0, 140, 129)
+                                            },
+                                            Some(lang.pick(
+                                                "最近 1 秒电压采样的峰峰值；说明书建议使用 1000 SPS。仅供辅助分析。",
+                                                "Peak-to-peak voltage over the latest 1 second. The manual recommends 1000 SPS. For reference only.",
+                                            )),
                                         );
                                     });
                             });
@@ -956,6 +985,7 @@ impl App {
             }
         });
         let visible = self.trace_visible;
+        let dark_mode = ui.visuals().dark_mode;
         let plot_height = (ui.available_height() - 8.0).max(150.0);
         Plot::new("measurements_plot")
             .width(ui.available_width())
@@ -968,7 +998,7 @@ impl App {
                     if visible[index] {
                         plot.line(
                             Line::new(metric.title(lang), self.chart_points(*metric))
-                                .color(metric.color())
+                                .color(metric.label_color(dark_mode))
                                 .width(2.0),
                         );
                     }
@@ -1312,6 +1342,51 @@ impl eframe::App for App {
             } else {
                 Duration::from_millis(250)
             });
+    }
+}
+
+// 最近 1 秒电压采样的峰峰值，仅供参考，并非仪表模拟带宽内的完整纹波测量。
+fn ripple_vpp_mv(samples: &VecDeque<TimedSample>) -> Option<f64> {
+    let end = samples.back()?.seconds;
+    let mut minimum = f64::INFINITY;
+    let mut maximum = f64::NEG_INFINITY;
+    let mut count = 0;
+    for item in samples
+        .iter()
+        .rev()
+        .take_while(|item| item.seconds >= end - 1.0)
+    {
+        let voltage = item.sample.voltage as f64;
+        if voltage.is_finite() {
+            minimum = minimum.min(voltage);
+            maximum = maximum.max(voltage);
+            count += 1;
+        }
+    }
+    (count >= 2).then_some((maximum - minimum) * 1000.0)
+}
+
+#[cfg(test)]
+mod ripple_tests {
+    use super::*;
+
+    #[test]
+    fn uses_only_the_latest_second_of_voltage_samples() {
+        let mut samples = VecDeque::new();
+        for (seconds, voltage) in [(0.0, 10.0), (1.0, 5.0), (1.5, 5.02), (2.0, 4.99)] {
+            samples.push_back(TimedSample {
+                seconds,
+                sample: protocol::Sample {
+                    voltage,
+                    current: 0.0,
+                    dp: 0.0,
+                    dm: 0.0,
+                },
+            });
+        }
+        assert!((ripple_vpp_mv(&samples).unwrap() - 30.0).abs() < 0.01);
+        samples.truncate(1);
+        assert_eq!(ripple_vpp_mv(&samples), None);
     }
 }
 
