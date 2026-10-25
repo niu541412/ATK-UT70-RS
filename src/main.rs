@@ -622,8 +622,7 @@ impl App {
             }
         });
         let visible = self.trace_visible;
-        let show_hint = self.started_at.elapsed() < Duration::from_secs(5);
-        let plot_height = (ui.available_height() - if show_hint { 32.0 } else { 8.0 }).max(150.0);
+        let plot_height = (ui.available_height() - 8.0).max(150.0);
         Plot::new("measurements_plot")
             .width(ui.available_width())
             .height(plot_height)
@@ -641,12 +640,6 @@ impl App {
                     }
                 }
             });
-        if show_hint {
-            ui.small(lang.pick(
-                "曲线显示最近 60 秒。负载电阻按 V/I 计算，电流不高于 1 mA 时不绘制；它不是线阻。CSV 记录全部测量点。",
-                "Charts show the latest 60 seconds. Load resistance is V/I and is omitted at or below 1 mA; it is not cable resistance. CSV stores all samples.",
-            ));
-        }
     }
 
     fn flashing_controls(&mut self, ui: &mut egui::Ui) {
@@ -762,6 +755,14 @@ impl eframe::App for App {
                             .pick("UT70 官方资料", "Official UT70 resources"),
                         "https://www.openedv.com/docs/tool/USB/usb.html",
                     );
+                    if self.started_at.elapsed() < Duration::from_secs(5) {
+                        let hint = self.language.pick(
+                            "曲线显示最近 60 秒。负载电阻按 V/I 计算，电流不高于 1 mA 时不绘制；它不是线阻。CSV 记录全部测量点。",
+                            "Charts show the latest 60 seconds. Load resistance is V/I and is omitted at or below 1 mA; it is not cable resistance. CSV stores all samples.",
+                        );
+                        ui.add(egui::Label::new(egui::RichText::new(hint).small()).truncate())
+                            .on_hover_text(hint);
+                    }
                 });
             });
         egui::CentralPanel::default().show(ui, |ui| {
