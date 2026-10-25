@@ -12,7 +12,7 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use worker::{Command, Event, TimedSample};
 
 struct IconTextures {
@@ -155,6 +155,7 @@ impl Metric {
 }
 
 struct App {
+    started_at: Instant,
     commands: Sender<Command>,
     events: Receiver<Event>,
     icons: IconTextures,
@@ -185,6 +186,7 @@ impl App {
         std::thread::spawn(move || worker::run(command_rx, event_tx));
         let _ = command_tx.send(Command::Connect);
         Self {
+            started_at: Instant::now(),
             commands: command_tx,
             events: event_rx,
             icons: IconTextures::new(ctx),
@@ -620,7 +622,8 @@ impl App {
             }
         });
         let visible = self.trace_visible;
-        let plot_height = (ui.available_height() - 32.0).max(150.0);
+        let show_hint = self.started_at.elapsed() < Duration::from_secs(5);
+        let plot_height = (ui.available_height() - if show_hint { 32.0 } else { 8.0 }).max(150.0);
         Plot::new("measurements_plot")
             .width(ui.available_width())
             .height(plot_height)
@@ -638,10 +641,12 @@ impl App {
                     }
                 }
             });
-        ui.small(lang.pick(
-            "曲线显示最近 60 秒。负载电阻按 V/I 计算，电流不高于 1 mA 时不绘制；它不是线阻。CSV 记录全部测量点。",
-            "Charts show the latest 60 seconds. Load resistance is V/I and is omitted at or below 1 mA; it is not cable resistance. CSV stores all samples.",
-        ));
+        if show_hint {
+            ui.small(lang.pick(
+                "曲线显示最近 60 秒。负载电阻按 V/I 计算，电流不高于 1 mA 时不绘制；它不是线阻。CSV 记录全部测量点。",
+                "Charts show the latest 60 seconds. Load resistance is V/I and is omitted at or below 1 mA; it is not cable resistance. CSV stores all samples.",
+            ));
+        }
     }
 
     fn flashing_controls(&mut self, ui: &mut egui::Ui) {
