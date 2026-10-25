@@ -56,6 +56,20 @@ impl Metric {
         }
     }
 
+    fn label_color(self, dark_mode: bool) -> egui::Color32 {
+        if dark_mode {
+            return self.color();
+        }
+        match self {
+            Self::Voltage => egui::Color32::from_rgb(25, 130, 67),
+            Self::Current => egui::Color32::from_rgb(175, 49, 54),
+            Self::Power => egui::Color32::from_rgb(104, 58, 166),
+            Self::Dp => egui::Color32::from_rgb(25, 111, 169),
+            Self::Dm => egui::Color32::from_rgb(167, 91, 15),
+            Self::Resistance => egui::Color32::from_rgb(132, 108, 12),
+        }
+    }
+
     fn value(self, sample: &protocol::Sample) -> Option<f64> {
         let value = match self {
             Self::Voltage => sample.voltage as f64,
@@ -308,11 +322,8 @@ impl App {
                 }
             });
         });
-        ui.add_sized(
-            [ui.available_width(), 20.0],
-            egui::Label::new(self.status.text(lang)).truncate(),
-        )
-        .on_hover_text(self.status.text(lang));
+        ui.add(egui::Label::new(self.status.text(lang)).truncate())
+            .on_hover_text(self.status.text(lang));
         self.device_details(ui);
         ui.horizontal(|ui| {
             if ui
@@ -529,8 +540,14 @@ impl App {
         });
         if let Some(s) = latest {
             ui.horizontal(|ui| {
-                ui.colored_label(Metric::Dp.color(), format!("D+ {:.4} V", s.dp));
-                ui.colored_label(Metric::Dm.color(), format!("D− {:.4} V", s.dm));
+                ui.colored_label(
+                    Metric::Dp.label_color(ui.visuals().dark_mode),
+                    format!("D+ {:.4} V", s.dp),
+                );
+                ui.colored_label(
+                    Metric::Dm.label_color(ui.visuals().dark_mode),
+                    format!("D− {:.4} V", s.dm),
+                );
             });
         } else {
             ui.label(lang.pick("暂无测量数据", "No measurement data yet"));
@@ -543,7 +560,8 @@ impl App {
             for (index, metric) in Metric::ALL.iter().enumerate() {
                 ui.checkbox(
                     &mut self.trace_visible[index],
-                    egui::RichText::new(metric.title(lang)).color(metric.color()),
+                    egui::RichText::new(metric.title(lang))
+                        .color(metric.label_color(ui.visuals().dark_mode)),
                 );
             }
         });

@@ -36,7 +36,7 @@ public static class Ut70Icon
                 }
             }
 
-            using (var smallFont = new Font("Segoe UI", 74, FontStyle.Bold, GraphicsUnit.Pixel))
+            using (var smallFont = new Font("Segoe UI", 54, FontStyle.Bold, GraphicsUnit.Pixel))
             using (var font = new Font("Segoe UI", 148, FontStyle.Bold, GraphicsUnit.Pixel))
             using (var format = new StringFormat())
             {
