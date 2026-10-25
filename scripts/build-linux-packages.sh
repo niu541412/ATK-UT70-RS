@@ -19,6 +19,9 @@ mkdir -p "$deb_root/DEBIAN" "$rpm_root/SOURCES" "$rpm_root/SPECS" "$project_root
 install -Dm0755 "$binary" "$deb_root/usr/bin/atk-ut70-rs"
 install -Dm0644 "$project_root/assets/atk-ut70-rs.desktop" "$deb_root/usr/share/applications/atk-ut70-rs.desktop"
 install -Dm0644 "$project_root/assets/atk-ut70-rs.png" "$deb_root/usr/share/icons/hicolor/512x512/apps/atk-ut70-rs.png"
+install -Dm0644 "$project_root/LICENSE" "$deb_root/usr/share/doc/atk-ut70-rs/LICENSE"
+install -Dm0644 "$project_root/assets/icons/LICENSE.phosphor" "$deb_root/usr/share/doc/atk-ut70-rs/LICENSE.phosphor"
+install -Dm0644 "$project_root/assets/fonts/OFL.Inter.txt" "$deb_root/usr/share/doc/atk-ut70-rs/OFL.Inter.txt"
 
 mkdir -p "$package_root/debian"
 cat > "$package_root/debian/control" <<'EOF'
@@ -55,6 +58,9 @@ dpkg-deb --root-owner-group --build "$deb_root" "$project_root/dist/ATK-UT70-RS-
 install -Dm0755 "$binary" "$rpm_root/SOURCES/atk-ut70-rs"
 install -Dm0644 "$project_root/assets/atk-ut70-rs.desktop" "$rpm_root/SOURCES/atk-ut70-rs.desktop"
 install -Dm0644 "$project_root/assets/atk-ut70-rs.png" "$rpm_root/SOURCES/atk-ut70-rs.png"
+install -Dm0644 "$project_root/LICENSE" "$rpm_root/SOURCES/LICENSE"
+install -Dm0644 "$project_root/assets/icons/LICENSE.phosphor" "$rpm_root/SOURCES/LICENSE.phosphor"
+install -Dm0644 "$project_root/assets/fonts/OFL.Inter.txt" "$rpm_root/SOURCES/OFL.Inter.txt"
 rpmbuild -bb \
   --target "$arch" \
   --define "_topdir $rpm_root" \

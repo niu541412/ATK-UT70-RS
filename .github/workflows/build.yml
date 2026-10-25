@@ -68,15 +68,18 @@ jobs:
         if: matrix.platform == 'windows'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Compress-Archive -Path 'target/${{ matrix.target }}/release/atk-ut70-rs.exe' -DestinationPath 'dist/ATK-UT70-RS-windows-${{ matrix.arch }}.zip'
+          New-Item -ItemType Directory -Force -Path dist, package-windows | Out-Null
+          Copy-Item 'target/${{ matrix.target }}/release/atk-ut70-rs.exe' package-windows/
+          Copy-Item LICENSE, assets/icons/LICENSE.phosphor, assets/fonts/OFL.Inter.txt package-windows/
+          Compress-Archive -Path 'package-windows/*' -DestinationPath 'dist/ATK-UT70-RS-windows-${{ matrix.arch }}.zip'
       - name: Package macOS app
         if: matrix.platform == 'macos'
         shell: bash
         run: |
-          mkdir -p ATK-UT70-RS.app/Contents/MacOS ATK-UT70-RS.app/Contents/Resources AppIcon.iconset dist
+          mkdir -p ATK-UT70-RS.app/Contents/MacOS ATK-UT70-RS.app/Contents/Resources/Licenses AppIcon.iconset dist
           cp "target/${{ matrix.target }}/release/atk-ut70-rs" ATK-UT70-RS.app/Contents/MacOS/
           cp assets/Info.plist ATK-UT70-RS.app/Contents/
+          cp LICENSE assets/icons/LICENSE.phosphor assets/fonts/OFL.Inter.txt ATK-UT70-RS.app/Contents/Resources/Licenses/
           for size in 16 32 128 256 512; do
             sips -z "$size" "$size" assets/atk-ut70-rs.png --out "AppIcon.iconset/icon_${size}x${size}.png" >/dev/null
           done

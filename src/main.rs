@@ -761,6 +761,20 @@ impl eframe::App for App {
                             ui.selectable_value(&mut self.language, Language::Chinese, "简体中文");
                             ui.selectable_value(&mut self.language, Language::English, "English");
                         });
+                    ui.separator();
+                    ui.label(format!("ATK UT70 RS v{}", env!("CARGO_PKG_VERSION")));
+                    ui.label(self.language.pick(
+                        "版权所有 © 2026 ATK-UT70-RS 贡献者",
+                        "Copyright © 2026 ATK-UT70-RS contributors",
+                    ));
+                    ui.add(egui::Label::new(self.language.pick(
+                        "本程序采用 GPL-3.0 许可证，允许再分发和修改；不提供任何担保。",
+                        "Licensed under GPL-3.0. You may share and modify it. No warranty is provided.",
+                    )).wrap());
+                    ui.hyperlink_to(
+                        self.language.pick("查看许可证", "View license"),
+                        "https://github.com/niu541412/ATK-UT70-RS/blob/main/LICENSE",
+                    );
                 });
             self.settings_dialog_open = open;
         }

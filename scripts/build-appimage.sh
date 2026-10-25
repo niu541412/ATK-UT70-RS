@@ -20,6 +20,9 @@ export PATH="$(pwd)/.tools:$PATH"
 export APPIMAGE_EXTRACT_AND_RUN=1
 export ARCH="$arch"
 export VERSION="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+install -Dm0644 LICENSE AppDir/usr/share/doc/atk-ut70-rs/LICENSE
+install -Dm0644 assets/icons/LICENSE.phosphor AppDir/usr/share/doc/atk-ut70-rs/LICENSE.phosphor
+install -Dm0644 assets/fonts/OFL.Inter.txt AppDir/usr/share/doc/atk-ut70-rs/OFL.Inter.txt
 
 .tools/linuxdeploy --appdir AppDir \
   --executable "target/release/atk-ut70-rs" \

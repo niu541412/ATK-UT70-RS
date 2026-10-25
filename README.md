@@ -4,6 +4,8 @@
 
 此仓库包含[逆向后的 HID 接口文档](docs/PROTOCOL.md)和客户端源码，不包含官方程序、固件、USB 抓包或个人测试日志。协议来自一台硬件 2.7、应用 V3.5 的 UT70；其他版本还需实机验证。已知限制与验证状态见[文档](docs/PROTOCOL.md#验证边界)。
 
+项目代码及文档采用 [GPL-3.0-only](LICENSE)；Phosphor 图标和 Inter 字体分别保留各自的 [MIT](assets/icons/LICENSE.phosphor) 与 [SIL OFL 1.1](assets/fonts/OFL.Inter.txt) 许可。下载包附带许可证文本，完整源码位于此仓库对应版本的 Git 标签。
+
 ## 下载与运行
 
 GitHub Actions 的 **Build desktop client** 工作流为以下架构生成独立产物，见每次构建的 Artifacts：
