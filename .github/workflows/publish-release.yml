@@ -1,0 +1,68 @@
+name: Publish release assets
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 已创建的草稿 Release 标签
+        required: true
+        type: string
+      build_run_id:
+        description: 对应标签的成功构建 Run ID
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ inputs.tag }}
+      BUILD_RUN_ID: ${{ inputs.build_run_id }}
+    steps:
+      - name: Verify build and download artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh run view "$BUILD_RUN_ID" --repo "$GITHUB_REPOSITORY" --json headBranch,conclusion |
+            jq -e --arg tag "$TAG" '.headBranch == $tag and .conclusion == "success"'
+          gh run download "$BUILD_RUN_ID" --repo "$GITHUB_REPOSITORY" --dir artifacts
+
+      - name: Check packages and create checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir dist
+          packages=(
+            ATK-UT70-RS-windows-x86_64.zip
+            ATK-UT70-RS-windows-aarch64.zip
+            ATK-UT70-RS-macos-x86_64.zip
+            ATK-UT70-RS-macos-aarch64.zip
+            ATK-UT70-RS-linux-x86_64.AppImage
+            ATK-UT70-RS-linux-x86_64.deb
+            ATK-UT70-RS-linux-x86_64.rpm
+            ATK-UT70-RS-linux-aarch64.AppImage
+            ATK-UT70-RS-linux-aarch64.deb
+            ATK-UT70-RS-linux-aarch64.rpm
+          )
+          for package in "${packages[@]}"; do
+            mapfile -t matches < <(find artifacts -type f -name "$package")
+            test "${#matches[@]}" -eq 1
+            test -s "${matches[0]}"
+            cp "${matches[0]}" "dist/$package"
+          done
+          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 10
+          (cd dist && sha256sum -- * > SHA256SUMS.txt)
+
+      - name: Upload and publish release
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft |
+            jq -e '.isDraft == true'
+          gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
