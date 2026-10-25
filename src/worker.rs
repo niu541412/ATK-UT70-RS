@@ -117,6 +117,13 @@ pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
                             }
                             let _ =
                                 tx.send(Event::Connected(maybe_version.ok(), rate, rate_confirmed));
+                            if let Ok(frame) =
+                                request(&hid, protocol::FACE, &[0; 4], 1, rate, start, &tx)
+                            {
+                                if let Some(screen) = frame.payload.first() {
+                                    let _ = tx.send(Event::Screen(*screen));
+                                }
+                            }
                             Ok(Some(hid))
                         }
                     }

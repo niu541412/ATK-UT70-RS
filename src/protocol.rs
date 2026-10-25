@@ -8,6 +8,7 @@ pub const CV_DATA: u8 = 0x08;
 pub const FREQUENCY: u8 = 0x70;
 pub const FAST_CHARGE: u8 = 0x20;
 pub const FAST_CHARGE_DESCRIPTION: u8 = 0x21;
+pub const EMARKER_RESULT_SCREEN: u8 = 21;
 pub const PROTOCOL_TYPES: [u8; 13] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 13, 20];
 pub const RATES: [u16; 6] = [4, 10, 50, 200, 500, 1000];
 pub const SCREENS: &[(u8, &str, &str)] = &[
@@ -22,6 +23,18 @@ pub const SCREENS: &[(u8, &str, &str)] = &[
     (20, "E-Marker 检测", "E-Marker detection"),
     (29, "设置", "Settings"),
 ];
+
+pub fn screen_names(screen: u8) -> (&'static str, &'static str) {
+    if screen == EMARKER_RESULT_SCREEN {
+        ("E-Marker 结果", "E-Marker result")
+    } else {
+        SCREENS
+            .iter()
+            .find(|(id, _, _)| *id == screen)
+            .map(|(_, chinese, english)| (*chinese, *english))
+            .unwrap_or(("未知", "Unknown"))
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct Frame {

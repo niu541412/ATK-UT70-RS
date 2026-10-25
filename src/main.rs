@@ -314,9 +314,10 @@ impl App {
                 Event::Screen(screen) => {
                     if self.screen != screen {
                         self.screen = screen;
+                        let (chinese, english) = protocol::screen_names(screen);
                         self.status = Message::new(
-                            format!("设备报告的界面编号：{screen}"),
-                            format!("Meter reports screen ID {screen}"),
+                            format!("设备报告的界面：{chinese}（{screen}）"),
+                            format!("Meter reports screen: {english} ({screen})"),
                         );
                         self.log(self.status.clone());
                     }
@@ -688,13 +689,10 @@ impl App {
                             |ui| {
                                 ui.label(lang.pick("仪表界面", "Meter screen"));
                                 egui::ComboBox::from_id_salt("meter_screen")
-                                    .selected_text(
-                                        protocol::SCREENS
-                                            .iter()
-                                            .find(|(id, _, _)| *id == self.screen)
-                                            .map(|(_, zh, en)| lang.pick(zh, en))
-                                            .unwrap_or(lang.pick("未知", "Unknown")),
-                                    )
+                                    .selected_text({
+                                        let (zh, en) = protocol::screen_names(self.screen);
+                                        lang.pick(zh, en)
+                                    })
                                     .show_ui(ui, |ui| {
                                         for (id, zh, en) in protocol::SCREENS {
                                             if *id == 20 {
