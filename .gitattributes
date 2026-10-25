@@ -4,4 +4,5 @@
 *.desktop text eol=lf
 *.plist text eol=lf
 *.png binary
+*.svg text eol=lf
 *.ico binary

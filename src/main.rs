@@ -14,6 +14,44 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 use worker::{Command, Event, TimedSample};
 
+struct IconTextures {
+    plugs: egui::TextureHandle,
+    plugs_connected: egui::TextureHandle,
+    settings: egui::TextureHandle,
+    firmware: egui::TextureHandle,
+}
+
+impl IconTextures {
+    fn new(ctx: &egui::Context) -> Self {
+        fn load(ctx: &egui::Context, name: &str, bytes: &[u8]) -> egui::TextureHandle {
+            let icon = eframe::icon_data::from_png_bytes(bytes).expect("内置图标应为有效 PNG");
+            let image = egui::ColorImage::from_rgba_unmultiplied(
+                [icon.width as usize, icon.height as usize],
+                &icon.rgba,
+            );
+            ctx.load_texture(name, image, egui::TextureOptions::LINEAR)
+        }
+        Self {
+            plugs: load(ctx, "plugs", include_bytes!("../assets/icons/plugs.png")),
+            plugs_connected: load(
+                ctx,
+                "plugs-connected",
+                include_bytes!("../assets/icons/plugs-connected.png"),
+            ),
+            settings: load(
+                ctx,
+                "gear-six",
+                include_bytes!("../assets/icons/gear-six.png"),
+            ),
+            firmware: load(
+                ctx,
+                "file-arrow-up",
+                include_bytes!("../assets/icons/file-arrow-up.png"),
+            ),
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Metric {
     Voltage,
@@ -87,6 +125,7 @@ impl Metric {
 struct App {
     commands: Sender<Command>,
     events: Receiver<Event>,
+    icons: IconTextures,
     samples: VecDeque<TimedSample>,
     status: Message,
     language: Language,
@@ -107,7 +146,7 @@ struct App {
 }
 
 impl App {
-    fn new() -> Self {
+    fn new(ctx: &egui::Context) -> Self {
         let (command_tx, command_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
         std::thread::spawn(move || worker::run(command_rx, event_tx));
@@ -115,6 +154,7 @@ impl App {
         Self {
             commands: command_tx,
             events: event_rx,
+            icons: IconTextures::new(ctx),
             samples: VecDeque::new(),
             status: Message::new("正在连接 UT70…", "Connecting to UT70…"),
             language: Language::Chinese,
@@ -283,34 +323,67 @@ impl App {
 
     fn header(&mut self, ui: &mut egui::Ui) {
         let lang = self.language;
+        let settings_icon = self.icons.settings.id();
+        let firmware_icon = self.icons.firmware.id();
+        let plugs_icon = self.icons.plugs.id();
+        let plugs_connected_icon = self.icons.plugs_connected.id();
         ui.horizontal(|ui| {
             ui.heading("ATK UT70");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let tint = ui.visuals().text_color();
+                let icon_size = egui::vec2(20.0, 20.0);
+                let button_size = egui::vec2(40.0, 36.0);
                 let settings = ui
-                    .add_sized([36.0, 34.0], egui::Button::new(""))
+                    .add(
+                        egui::Button::image(
+                            egui::Image::new((settings_icon, icon_size)).tint(tint),
+                        )
+                        .min_size(button_size),
+                    )
                     .on_hover_text(lang.pick("设置", "Settings"));
-                Self::draw_settings_icon(ui, settings.rect);
                 if settings.clicked() {
                     self.settings_dialog_open = true;
                 }
-                if ui
-                    .button(lang.pick("固件更新", "Firmware update"))
-                    .clicked()
-                {
+                let firmware = ui
+                    .add(
+                        egui::Button::image(
+                            egui::Image::new((firmware_icon, icon_size)).tint(tint),
+                        )
+                        .min_size(button_size),
+                    )
+                    .on_hover_text(lang.pick("固件更新", "Firmware update"));
+                if firmware.clicked() {
                     self.firmware_dialog_open = true;
                 }
                 let present = self.connected || self.bootloader;
+                let connection_color = if self.connecting {
+                    egui::Color32::from_rgb(194, 141, 36)
+                } else if present {
+                    egui::Color32::from_rgb(23, 151, 91)
+                } else {
+                    tint
+                };
                 let toggle = ui
                     .add_enabled(
                         !self.flashing && !self.connecting,
-                        egui::Button::new("").min_size(egui::vec2(40.0, 34.0)),
+                        egui::Button::image(
+                            egui::Image::new((
+                                if present {
+                                    plugs_connected_icon
+                                } else {
+                                    plugs_icon
+                                },
+                                icon_size,
+                            ))
+                            .tint(connection_color),
+                        )
+                        .min_size(button_size),
                     )
                     .on_hover_text(if present {
                         lang.pick("断开设备", "Disconnect meter")
                     } else {
                         lang.pick("连接设备", "Connect meter")
                     });
-                Self::draw_connection_icon(ui, toggle.rect, present, self.connecting);
                 if toggle.clicked() {
                     if present {
                         let _ = self.commands.send(Command::Disconnect);
@@ -421,77 +494,6 @@ impl App {
                 column.label(egui::RichText::new(value).strong());
             }
         });
-    }
-
-    fn draw_connection_icon(ui: &egui::Ui, rect: egui::Rect, present: bool, connecting: bool) {
-        let painter = ui.painter_at(rect);
-        let center = rect.center();
-        let color = if connecting {
-            egui::Color32::from_rgb(230, 180, 70)
-        } else if present {
-            egui::Color32::from_rgb(80, 215, 135)
-        } else {
-            ui.visuals().text_color()
-        };
-        let stroke = egui::Stroke::new(2.0, color);
-        let x = center.x;
-        let y = center.y;
-        let shift = if present { 6.0 } else { -2.0 };
-        painter.line_segment(
-            [egui::pos2(x - 17.0, y), egui::pos2(x - 9.0 + shift, y)],
-            stroke,
-        );
-        painter.line_segment(
-            [
-                egui::pos2(x - 9.0 + shift, y - 6.0),
-                egui::pos2(x - 9.0 + shift, y + 6.0),
-            ],
-            stroke,
-        );
-        painter.line_segment(
-            [
-                egui::pos2(x - 9.0 + shift, y - 6.0),
-                egui::pos2(x - 2.0 + shift, y - 6.0),
-            ],
-            stroke,
-        );
-        painter.line_segment(
-            [
-                egui::pos2(x - 9.0 + shift, y + 6.0),
-                egui::pos2(x - 2.0 + shift, y + 6.0),
-            ],
-            stroke,
-        );
-        for dy in [-3.0, 3.0] {
-            painter.line_segment(
-                [
-                    egui::pos2(x - 2.0 + shift, y + dy),
-                    egui::pos2(x + 2.0 + shift, y + dy),
-                ],
-                stroke,
-            );
-        }
-        painter.line_segment(
-            [egui::pos2(x + 8.0, y - 6.0), egui::pos2(x + 8.0, y + 6.0)],
-            stroke,
-        );
-        painter.line_segment([egui::pos2(x + 8.0, y), egui::pos2(x + 17.0, y)], stroke);
-    }
-
-    fn draw_settings_icon(ui: &egui::Ui, rect: egui::Rect) {
-        let painter = ui.painter_at(rect);
-        let center = rect.center();
-        let stroke = egui::Stroke::new(1.8, ui.visuals().text_color());
-        painter.circle_stroke(center, 7.0, stroke);
-        painter.circle_stroke(center, 2.3, stroke);
-        for index in 0..8 {
-            let angle = index as f32 * std::f32::consts::TAU / 8.0;
-            let direction = egui::vec2(angle.cos(), angle.sin());
-            painter.line_segment(
-                [center + direction * 8.0, center + direction * 11.0],
-                stroke,
-            );
-        }
     }
 
     fn reading(ui: &mut egui::Ui, title: &str, value: String, color: egui::Color32) {
@@ -743,6 +745,6 @@ fn main() -> eframe::Result<()> {
                 ),
             ..Default::default()
         },
-        Box::new(|_| Ok(Box::new(App::new()))),
+        Box::new(|cc| Ok(Box::new(App::new(&cc.egui_ctx)))),
     )
 }
