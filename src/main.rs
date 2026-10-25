@@ -76,6 +76,7 @@ struct App {
     samples: VecDeque<TimedSample>,
     status: Message,
     language: Language,
+    connecting: bool,
     connected: bool,
     bootloader: bool,
     flashing: bool,
@@ -87,6 +88,7 @@ struct App {
     flash_confirmed: bool,
     progress: Option<(usize, usize)>,
     firmware_dialog_open: bool,
+    settings_dialog_open: bool,
     trace_visible: [bool; 6],
 }
 
@@ -102,6 +104,7 @@ impl App {
             samples: VecDeque::new(),
             status: Message::new("正在连接 UT70…", "Connecting to UT70…"),
             language: Language::Chinese,
+            connecting: true,
             connected: false,
             bootloader: false,
             flashing: false,
@@ -113,6 +116,7 @@ impl App {
             flash_confirmed: false,
             progress: None,
             firmware_dialog_open: false,
+            settings_dialog_open: false,
             trace_visible: [true, true, false, false, false, false],
         }
     }
@@ -122,6 +126,7 @@ impl App {
             match event {
                 Event::Status(message) => self.status = message,
                 Event::Connected(version, rate, rate_confirmed) => {
+                    self.connecting = false;
                     self.connected = true;
                     self.bootloader = false;
                     self.rate = rate;
@@ -148,6 +153,7 @@ impl App {
                     self.version = version;
                 }
                 Event::Bootloader(version) => {
+                    self.connecting = false;
                     self.connected = false;
                     self.bootloader = true;
                     self.samples.clear();
@@ -159,6 +165,7 @@ impl App {
                     );
                 }
                 Event::Disconnected => {
+                    self.connecting = false;
                     self.connected = false;
                     self.bootloader = false;
                     self.version = None;
@@ -206,6 +213,7 @@ impl App {
                     );
                 }
                 Event::Error(message) => {
+                    self.connecting = false;
                     self.flashing = false;
                     self.status = message;
                 }
@@ -260,78 +268,53 @@ impl App {
     }
 
     fn header(&mut self, ui: &mut egui::Ui) {
+        let lang = self.language;
         ui.horizontal(|ui| {
             ui.heading("ATK UT70");
-            if ui
-                .button(self.language.pick("固件更新", "Firmware update"))
-                .clicked()
-            {
-                self.firmware_dialog_open = true;
-            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let settings = ui
+                    .add_sized([36.0, 34.0], egui::Button::new(""))
+                    .on_hover_text(lang.pick("设置", "Settings"));
+                Self::draw_settings_icon(ui, settings.rect);
+                if settings.clicked() {
+                    self.settings_dialog_open = true;
+                }
+                if ui
+                    .button(lang.pick("固件更新", "Firmware update"))
+                    .clicked()
+                {
+                    self.firmware_dialog_open = true;
+                }
+                let present = self.connected || self.bootloader;
+                let toggle = ui
+                    .add_enabled(
+                        !self.flashing && !self.connecting,
+                        egui::Button::new("").min_size(egui::vec2(40.0, 34.0)),
+                    )
+                    .on_hover_text(if present {
+                        lang.pick("断开设备", "Disconnect meter")
+                    } else {
+                        lang.pick("连接设备", "Connect meter")
+                    });
+                Self::draw_connection_icon(ui, toggle.rect, present, self.connecting);
+                if toggle.clicked() {
+                    if present {
+                        let _ = self.commands.send(Command::Disconnect);
+                    } else {
+                        let _ = self.commands.send(Command::Connect);
+                        self.connecting = true;
+                        self.status = Message::new("正在连接…", "Connecting…");
+                    }
+                }
+            });
         });
-        egui::ComboBox::from_label(self.language.pick("语言", "Language"))
-            .selected_text(match self.language {
-                Language::Chinese => "简体中文",
-                Language::English => "English",
-            })
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.language, Language::Chinese, "简体中文");
-                ui.selectable_value(&mut self.language, Language::English, "English");
-            });
-        let lang = self.language;
-        ui.label(self.status.text(lang));
-        if let Some(v) = &self.version {
-            ui.label(match lang {
-                Language::Chinese => format!(
-                    "{} · 硬件 {}.{} · 应用 V{}.{} · Boot {} · 序列号 {}",
-                    if v.boot_mode {
-                        "升级模式"
-                    } else {
-                        "应用模式"
-                    },
-                    v.hardware / 10,
-                    v.hardware % 10,
-                    v.application / 10,
-                    v.application % 10,
-                    v.bootloader,
-                    v.serial,
-                ),
-                Language::English => format!(
-                    "{} · Hardware {}.{} · App V{}.{} · Boot {} · Serial {}",
-                    if v.boot_mode {
-                        "Upgrade mode"
-                    } else {
-                        "Application mode"
-                    },
-                    v.hardware / 10,
-                    v.hardware % 10,
-                    v.application / 10,
-                    v.application % 10,
-                    v.bootloader,
-                    v.serial,
-                ),
-            });
-        }
+        ui.add_sized(
+            [ui.available_width(), 20.0],
+            egui::Label::new(self.status.text(lang)).truncate(),
+        )
+        .on_hover_text(self.status.text(lang));
+        self.device_details(ui);
         ui.horizontal(|ui| {
-            if ui
-                .add_enabled(
-                    !self.connected && !self.bootloader && !self.flashing,
-                    egui::Button::new(lang.pick("连接设备", "Connect meter")),
-                )
-                .clicked()
-            {
-                let _ = self.commands.send(Command::Connect);
-                self.status = Message::new("正在连接…", "Connecting…");
-            }
-            if ui
-                .add_enabled(
-                    (self.connected || self.bootloader) && !self.flashing,
-                    egui::Button::new(lang.pick("断开", "Disconnect")),
-                )
-                .clicked()
-            {
-                let _ = self.commands.send(Command::Disconnect);
-            }
             if ui
                 .add_enabled(
                     self.connected && !self.recording,
@@ -390,44 +373,172 @@ impl App {
                 let _ = self.commands.send(Command::SetScreen(selected_screen));
             }
         });
+        ui.add_space(6.0);
+        self.readings(ui);
     }
 
-    fn reading(ui: &mut egui::Ui, title: &str, value: String, color: egui::Color32) {
-        ui.group(|ui| {
-            ui.label(title);
-            ui.label(egui::RichText::new(value).size(30.0).strong().color(color));
+    fn device_details(&self, ui: &mut egui::Ui) {
+        let lang = self.language;
+        let version = self.version.as_ref();
+        let mode = if self.connecting {
+            lang.pick("连接中", "Connecting")
+        } else if self.bootloader {
+            lang.pick("升级模式", "Upgrade mode")
+        } else if self.connected {
+            lang.pick("应用模式", "Application mode")
+        } else {
+            lang.pick("未连接", "Disconnected")
+        };
+        let hardware = version.map_or("—".into(), |v| {
+            format!("{}.{}", v.hardware / 10, v.hardware % 10)
+        });
+        let application = version.filter(|v| !v.boot_mode).map_or("—".into(), |v| {
+            format!("V{}.{}", v.application / 10, v.application % 10)
+        });
+        let boot = version.map_or("—".into(), |v| v.bootloader.to_string());
+        let serial = version.map_or("—".into(), |v| v.serial.clone());
+        let fields = [
+            (lang.pick("状态", "Status"), mode.to_owned()),
+            (lang.pick("硬件", "Hardware"), hardware),
+            (lang.pick("应用", "Application"), application),
+            ("Boot", boot),
+            (lang.pick("序列号", "Serial"), serial),
+        ];
+        ui.columns(5, |columns| {
+            for (column, (label, value)) in columns.iter_mut().zip(fields) {
+                column.label(egui::RichText::new(label).small().weak());
+                column.label(egui::RichText::new(value).strong());
+            }
         });
     }
 
-    fn plots(&mut self, ui: &mut egui::Ui) {
+    fn draw_connection_icon(ui: &egui::Ui, rect: egui::Rect, present: bool, connecting: bool) {
+        let painter = ui.painter_at(rect);
+        let center = rect.center();
+        let color = if connecting {
+            egui::Color32::from_rgb(230, 180, 70)
+        } else if present {
+            egui::Color32::from_rgb(80, 215, 135)
+        } else {
+            ui.visuals().text_color()
+        };
+        let stroke = egui::Stroke::new(2.0, color);
+        let x = center.x;
+        let y = center.y;
+        let shift = if present { 6.0 } else { -2.0 };
+        painter.line_segment(
+            [egui::pos2(x - 17.0, y), egui::pos2(x - 9.0 + shift, y)],
+            stroke,
+        );
+        painter.line_segment(
+            [
+                egui::pos2(x - 9.0 + shift, y - 6.0),
+                egui::pos2(x - 9.0 + shift, y + 6.0),
+            ],
+            stroke,
+        );
+        painter.line_segment(
+            [
+                egui::pos2(x - 9.0 + shift, y - 6.0),
+                egui::pos2(x - 2.0 + shift, y - 6.0),
+            ],
+            stroke,
+        );
+        painter.line_segment(
+            [
+                egui::pos2(x - 9.0 + shift, y + 6.0),
+                egui::pos2(x - 2.0 + shift, y + 6.0),
+            ],
+            stroke,
+        );
+        for dy in [-3.0, 3.0] {
+            painter.line_segment(
+                [
+                    egui::pos2(x - 2.0 + shift, y + dy),
+                    egui::pos2(x + 2.0 + shift, y + dy),
+                ],
+                stroke,
+            );
+        }
+        painter.line_segment(
+            [egui::pos2(x + 8.0, y - 6.0), egui::pos2(x + 8.0, y + 6.0)],
+            stroke,
+        );
+        painter.line_segment([egui::pos2(x + 8.0, y), egui::pos2(x + 17.0, y)], stroke);
+    }
+
+    fn draw_settings_icon(ui: &egui::Ui, rect: egui::Rect) {
+        let painter = ui.painter_at(rect);
+        let center = rect.center();
+        let stroke = egui::Stroke::new(1.8, ui.visuals().text_color());
+        painter.circle_stroke(center, 7.0, stroke);
+        painter.circle_stroke(center, 2.3, stroke);
+        for index in 0..8 {
+            let angle = index as f32 * std::f32::consts::TAU / 8.0;
+            let direction = egui::vec2(angle.cos(), angle.sin());
+            painter.line_segment(
+                [center + direction * 8.0, center + direction * 11.0],
+                stroke,
+            );
+        }
+    }
+
+    fn reading(ui: &mut egui::Ui, title: &str, value: String, color: egui::Color32) {
+        let width = ui.available_width();
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 94.0), egui::Sense::hover());
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, egui::CornerRadius::same(12), color);
+        painter.text(
+            rect.left_top() + egui::vec2(15.0, 12.0),
+            egui::Align2::LEFT_TOP,
+            title,
+            egui::FontId::proportional(14.0),
+            egui::Color32::WHITE,
+        );
+        painter.text(
+            rect.left_top() + egui::vec2(15.0, 39.0),
+            egui::Align2::LEFT_TOP,
+            value,
+            egui::FontId::monospace(30.0),
+            egui::Color32::WHITE,
+        );
+    }
+
+    fn readings(&self, ui: &mut egui::Ui) {
         let lang = self.language;
-        ui.separator();
         let latest = self.latest();
         ui.columns(3, |columns| {
             Self::reading(
                 &mut columns[0],
                 lang.pick("电压", "Voltage"),
                 latest.map_or("—".into(), |s| format!("{:.3} V", s.voltage)),
-                Metric::Voltage.color(),
+                egui::Color32::from_rgb(24, 117, 75),
             );
             Self::reading(
                 &mut columns[1],
                 lang.pick("电流", "Current"),
                 latest.map_or("—".into(), |s| format!("{:.3} A", s.current)),
-                Metric::Current.color(),
+                egui::Color32::from_rgb(168, 51, 65),
             );
             Self::reading(
                 &mut columns[2],
                 lang.pick("功率", "Power"),
                 latest.map_or("—".into(), |s| format!("{:.3} W", s.voltage * s.current)),
-                Metric::Power.color(),
+                egui::Color32::from_rgb(108, 65, 167),
             );
         });
         if let Some(s) = latest {
-            ui.label(format!("D+ {:.4} V     D− {:.4} V", s.dp, s.dm));
+            ui.horizontal(|ui| {
+                ui.colored_label(Metric::Dp.color(), format!("D+ {:.4} V", s.dp));
+                ui.colored_label(Metric::Dm.color(), format!("D− {:.4} V", s.dm));
+            });
         } else {
             ui.label(lang.pick("暂无测量数据", "No measurement data yet"));
         }
+    }
+
+    fn plots(&mut self, ui: &mut egui::Ui) {
+        let lang = self.language;
         ui.horizontal_wrapped(|ui| {
             for (index, metric) in Metric::ALL.iter().enumerate() {
                 ui.checkbox(
@@ -437,8 +548,10 @@ impl App {
             }
         });
         let visible = self.trace_visible;
+        let plot_height = (ui.available_height() - 32.0).max(150.0);
         Plot::new("measurements_plot")
-            .height(320.0)
+            .width(ui.available_width())
+            .height(plot_height)
             .legend(Legend::default())
             .x_axis_label(lang.pick("秒", "Seconds"))
             .y_axis_label(lang.pick("数值（单位见图例）", "Value (units in legend)"))
@@ -555,12 +668,30 @@ impl eframe::App for App {
             ui.ctx()
                 .send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
+        egui::Panel::top("main_header")
+            .resizable(false)
+            .show(ui, |ui| self.header(ui));
         egui::CentralPanel::default().show(ui, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                self.header(ui);
-                self.plots(ui);
-            });
+            self.plots(ui);
         });
+        if self.settings_dialog_open {
+            let mut open = true;
+            egui::Window::new(self.language.pick("设置", "Settings"))
+                .open(&mut open)
+                .default_width(280.0)
+                .show(ui.ctx(), |ui| {
+                    egui::ComboBox::from_label(self.language.pick("语言", "Language"))
+                        .selected_text(match self.language {
+                            Language::Chinese => "简体中文",
+                            Language::English => "English",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.language, Language::Chinese, "简体中文");
+                            ui.selectable_value(&mut self.language, Language::English, "English");
+                        });
+                });
+            self.settings_dialog_open = open;
+        }
         if self.firmware_dialog_open {
             let mut open = true;
             egui::Window::new(self.language.pick("固件更新", "Firmware update"))
@@ -591,7 +722,11 @@ fn main() -> eframe::Result<()> {
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
                 .with_inner_size([980.0, 650.0])
-                .with_min_inner_size([720.0, 480.0]),
+                .with_min_inner_size([720.0, 600.0])
+                .with_icon(
+                    eframe::icon_data::from_png_bytes(include_bytes!("../assets/atk-ut70-rs.png"))
+                        .expect("内置图标应为有效 PNG"),
+                ),
             ..Default::default()
         },
         Box::new(|_| Ok(Box::new(App::new()))),

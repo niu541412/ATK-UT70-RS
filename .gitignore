@@ -1,6 +1,8 @@
 /target/
 /dist/
 /AppDir/
+/AppIcon.iconset/
+/.package/
 /.tools/
 *.atk
 *.pcap
@@ -9,6 +11,8 @@
 *.log
 *.exe
 *.AppImage
+*.deb
+*.rpm
 *.zip
 *.app/
 !.github/
