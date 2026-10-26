@@ -9,6 +9,7 @@ pub const FREQUENCY: u8 = 0x70;
 pub const FAST_CHARGE: u8 = 0x20;
 pub const FAST_CHARGE_DESCRIPTION: u8 = 0x21;
 pub const EMARKER_RESULT_SCREEN: u8 = 21;
+pub const OTHER_SCREEN: u8 = 255;
 pub const PROTOCOL_TYPES: [u8; 13] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 13, 20];
 pub const RATES: [u16; 6] = [4, 10, 50, 200, 500, 1000];
 pub const SCREENS: &[(u8, &str, &str)] = &[
@@ -19,6 +20,7 @@ pub const SCREENS: &[(u8, &str, &str)] = &[
     (4, "手动触发", "Manual trigger"),
     (5, "自动检测", "Auto detection"),
     (11, "监控模式", "Monitor mode"),
+    (18, "线阻模式", "Line resistance"),
     (19, "DASH 检测", "DASH detection"),
     (20, "E-Marker 检测", "E-Marker detection"),
     (29, "设置", "Settings"),
@@ -32,8 +34,16 @@ pub fn screen_names(screen: u8) -> (&'static str, &'static str) {
             .iter()
             .find(|(id, _, _)| *id == screen)
             .map(|(_, chinese, english)| (*chinese, *english))
-            .unwrap_or(("未知", "Unknown"))
+            .unwrap_or(("其他", "Other"))
     }
+}
+
+pub fn selected_screen_names(screen: u8) -> (&'static str, &'static str) {
+    SCREENS
+        .iter()
+        .find(|(id, _, _)| *id == screen)
+        .map(|(_, chinese, english)| (*chinese, *english))
+        .unwrap_or(("其他", "Other"))
 }
 
 #[derive(Clone, Debug)]
@@ -249,6 +259,19 @@ mod tests {
     }
 
     #[test]
+    fn line_resistance_command_and_unknown_screen_label() {
+        let report = encode(FACE, &[18, 1, 1, 1]).unwrap();
+        assert_eq!(
+            &report[..10],
+            &[0, 0xEE, 0x03, 0x04, 0x12, 1, 1, 1, 0x0A, 0xFF]
+        );
+        assert_eq!(selected_screen_names(18), ("线阻模式", "Line resistance"));
+        assert_eq!(selected_screen_names(17), ("其他", "Other"));
+        assert_eq!(selected_screen_names(21), ("其他", "Other"));
+        assert_eq!(selected_screen_names(OTHER_SCREEN), ("其他", "Other"));
+    }
+
+    #[test]
     fn frequency_reply_accepts_only_matching_echoed_checksum() {
         let reply = [0xEE, 0x70, 4, 1, 4, 0, 0, 0x62, 0xFF];
         assert!(decode(&reply, None).is_err());
@@ -257,6 +280,24 @@ mod tests {
             500
         );
         assert!(decode(&reply, Some((FREQUENCY, 0x63))).is_err());
+    }
+
+    #[test]
+    fn manually_selected_rates_match_meter_reports() {
+        let reports = [
+            ([0xEE, 0x70, 4, 0, 1, 0x0A, 0, 0x6D, 0xFF], 10),
+            ([0xEE, 0x70, 4, 0, 2, 0x32, 0, 0x96, 0xFF], 50),
+            ([0xEE, 0x70, 4, 0, 3, 0xC8, 0, 0x2D, 0xFF], 200),
+            ([0xEE, 0x70, 4, 1, 4, 0xF4, 1, 0x5C, 0xFF], 500),
+            ([0xEE, 0x70, 4, 1, 5, 0xE8, 3, 0x53, 0xFF], 1000),
+            ([0xEE, 0x70, 4, 0, 0, 4, 0, 0x66, 0xFF], 4),
+        ];
+        for (report, expected_rate) in reports {
+            assert_eq!(
+                rate(&decode(&report, None).unwrap()).unwrap(),
+                expected_rate
+            );
+        }
     }
 
     #[test]

@@ -89,8 +89,9 @@ pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
                     let hid = api
                         .open(protocol::VID, protocol::PID)
                         .map_err(|e| e.to_string())?;
-                    let version = request(&hid, protocol::VERSION, &[0, 0], 2, rate, start, &tx)
-                        .and_then(|f| protocol::version(&f));
+                    let version =
+                        request(&hid, protocol::VERSION, &[0, 0], 2, &mut rate, start, &tx)
+                            .and_then(|f| protocol::version(&f));
                     match version {
                         Ok(v) if v.boot_mode => {
                             let _ = tx.send(Event::Bootloader(v));
@@ -107,9 +108,15 @@ pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
                                 );
                             }
                             let mut rate_confirmed = false;
-                            if let Ok(frame) =
-                                request(&hid, protocol::FREQUENCY, &[0; 4], 2, rate, start, &tx)
-                            {
+                            if let Ok(frame) = request(
+                                &hid,
+                                protocol::FREQUENCY,
+                                &[0; 4],
+                                2,
+                                &mut rate,
+                                start,
+                                &tx,
+                            ) {
                                 if let Ok(current) = protocol::rate(&frame) {
                                     rate = current;
                                     rate_confirmed = true;
@@ -118,7 +125,7 @@ pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
                             let _ =
                                 tx.send(Event::Connected(maybe_version.ok(), rate, rate_confirmed));
                             if let Ok(frame) =
-                                request(&hid, protocol::FACE, &[0; 4], 1, rate, start, &tx)
+                                request(&hid, protocol::FACE, &[0; 4], 1, &mut rate, start, &tx)
                             {
                                 if let Some(screen) = frame.payload.first() {
                                     let _ = tx.send(Event::Screen(*screen));
@@ -156,7 +163,7 @@ pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
                     .and_then(|hid| {
                         let payload = protocol::rate_payload(requested)?;
                         let frame =
-                            request(hid, protocol::FREQUENCY, &payload, 2, rate, start, &tx)?;
+                            request(hid, protocol::FREQUENCY, &payload, 2, &mut rate, start, &tx)?;
                         protocol::rate(&frame)
                     });
                 match result {
@@ -178,7 +185,8 @@ pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
                     );
                     continue;
                 }
-                if matches!(screen, 4 | 5 | 20) {
+                // These modes can start a workflow or disrupt HID, so do not wait for a query.
+                if matches!(screen, 4 | 5 | 18 | 20) {
                     let result = device
                         .as_ref()
                         .ok_or("device is not connected".to_string())
@@ -197,8 +205,17 @@ pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
                     .as_ref()
                     .ok_or("device is not connected".to_string())
                     .and_then(|hid| {
-                        request(hid, protocol::FACE, &[screen, 1, 1, 1], 2, rate, start, &tx)?;
-                        let frame = request(hid, protocol::FACE, &[0; 4], 2, rate, start, &tx)?;
+                        request(
+                            hid,
+                            protocol::FACE,
+                            &[screen, 1, 1, 1],
+                            2,
+                            &mut rate,
+                            start,
+                            &tx,
+                        )?;
+                        let frame =
+                            request(hid, protocol::FACE, &[0; 4], 2, &mut rate, start, &tx)?;
                         frame
                             .payload
                             .first()
@@ -320,11 +337,7 @@ pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
                         Ok(0) => {}
                         Ok(n) => {
                             if let Ok(frame) = protocol::decode(&buf[..n], None) {
-                                if frame.command == protocol::FACE {
-                                    if let Some(screen) = frame.payload.first() {
-                                        let _ = tx.send(Event::Screen(*screen));
-                                    }
-                                }
+                                observe_control_frame(&frame, &mut rate, &tx);
                                 if scan_deadline.is_some() {
                                     if let Ok(report) = protocol::protocol_report(&frame) {
                                         scan_last_report = Some(Instant::now());
@@ -419,12 +432,31 @@ fn process_sample_report(report: &[u8], rate: u16, start: Instant) -> Option<Vec
     )
 }
 
+fn observe_control_frame(frame: &protocol::Frame, rate: &mut u16, tx: &Sender<Event>) {
+    match frame.command {
+        protocol::FACE => {
+            if let Some(screen) = frame.payload.first() {
+                let _ = tx.send(Event::Screen(*screen));
+            }
+        }
+        protocol::FREQUENCY => {
+            if let Ok(actual) = protocol::rate(frame) {
+                if *rate != actual {
+                    *rate = actual;
+                    let _ = tx.send(Event::Rate(actual));
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 fn request(
     hid: &HidDevice,
     command: u8,
     payload: &[u8],
     timeout_secs: u64,
-    rate: u16,
+    rate: &mut u16,
     start: Instant,
     tx: &Sender<Event>,
 ) -> Result<protocol::Frame, String> {
@@ -442,8 +474,9 @@ fn request(
             if frame.command == command {
                 return Ok(frame);
             }
+            observe_control_frame(&frame, rate, tx);
             if frame.command == protocol::CV_DATA {
-                if let Some(batch) = process_sample_report(&buf[..n], rate, start) {
+                if let Some(batch) = process_sample_report(&buf[..n], *rate, start) {
                     let _ = tx.send(Event::Samples(batch));
                 }
             }
@@ -497,12 +530,21 @@ fn flash(
     tx: &Sender<Event>,
     start: Instant,
 ) -> Result<protocol::VersionInfo, String> {
+    let mut rate = 4;
     let fw = firmware::Firmware::read(path)?;
     let api = HidApi::new().map_err(|e| e.to_string())?;
     let hid = api
         .open(protocol::VID, protocol::PID)
         .map_err(|e| e.to_string())?;
-    let mode = protocol::version(&request(&hid, protocol::VERSION, &[0, 0], 2, 4, start, tx)?)?;
+    let mode = protocol::version(&request(
+        &hid,
+        protocol::VERSION,
+        &[0, 0],
+        2,
+        &mut rate,
+        start,
+        tx,
+    )?)?;
     if !mode.boot_mode {
         return Err("meter is not in upgrade mode; hold the right button while reconnecting the side HID cable".into());
     }
@@ -552,7 +594,9 @@ fn flash(
     while Instant::now() < deadline {
         if let Ok(api) = HidApi::new() {
             if let Ok(device) = api.open(protocol::VID, protocol::PID) {
-                if let Ok(frame) = request(&device, protocol::VERSION, &[0, 0], 2, 4, start, tx) {
+                if let Ok(frame) =
+                    request(&device, protocol::VERSION, &[0, 0], 2, &mut rate, start, tx)
+                {
                     if let Ok(version) = protocol::version(&frame) {
                         if !version.boot_mode {
                             if version.application as u16 != fw.application {
@@ -567,4 +611,29 @@ fn flash(
         std::thread::sleep(Duration::from_millis(250));
     }
     Err("transfer ended, but the meter did not return to application mode".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    #[test]
+    fn manual_screen_and_rate_reports_update_worker_state() {
+        let (tx, rx) = mpsc::channel();
+        let mut rate = 4;
+        let screen_report = protocol::encode(protocol::FACE, &[17, 0, 0, 0]).unwrap();
+        let screen = protocol::decode(&screen_report[1..], None).unwrap();
+        observe_control_frame(&screen, &mut rate, &tx);
+        assert!(matches!(rx.try_recv(), Ok(Event::Screen(17))));
+
+        let rate_report = [0xEE, 0x70, 4, 0, 3, 0xC8, 0, 0x2D, 0xFF];
+        let frequency = protocol::decode(&rate_report, None).unwrap();
+        observe_control_frame(&frequency, &mut rate, &tx);
+        assert_eq!(rate, 200);
+        assert!(matches!(rx.try_recv(), Ok(Event::Rate(200))));
+
+        observe_control_frame(&frequency, &mut rate, &tx);
+        assert!(rx.try_recv().is_err());
+    }
 }

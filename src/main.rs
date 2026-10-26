@@ -235,7 +235,7 @@ impl App {
             flashing: false,
             recording: false,
             rate: 4,
-            screen: 0,
+            screen: protocol::OTHER_SCREEN,
             pending_screen: None,
             version: None,
             firmware: None,
@@ -313,6 +313,7 @@ impl App {
                 }
                 Event::Disconnected => {
                     self.pending_screen = None;
+                    self.screen = protocol::OTHER_SCREEN;
                     self.scanning_protocols = false;
                     self.protocol_results.clear();
                     self.connecting = false;
@@ -329,8 +330,8 @@ impl App {
                 Event::Rate(rate) => {
                     self.rate = rate;
                     self.status = Message::new(
-                        format!("采样率已设为 {rate} SPS"),
-                        format!("Sample rate set to {rate} SPS"),
+                        format!("仪表报告采样率：{rate} SPS"),
+                        format!("Meter reports sample rate: {rate} SPS"),
                     );
                     self.log(self.status.clone());
                 }
@@ -805,9 +806,9 @@ impl App {
                                 ui.label(lang.pick("仪表界面", "Meter screen"));
                                 egui::ComboBox::from_id_salt("meter_screen")
                                     .width(170.0)
-                                    .height(280.0)
+                                    .height(330.0)
                                     .selected_text({
-                                        let (zh, en) = protocol::screen_names(self.screen);
+                                        let (zh, en) = protocol::selected_screen_names(self.screen);
                                         lang.pick(zh, en)
                                     })
                                     .show_ui(ui, |ui| {
@@ -818,6 +819,7 @@ impl App {
                                                 lang.pick(zh, en),
                                             );
                                         }
+                                        ui.label(lang.pick("其他", "Other"));
                                     });
                             },
                         );
