@@ -2,7 +2,20 @@ use crate::i18n::Language;
 use std::fs;
 use std::path::PathBuf;
 
-pub const WINDOWS: [u16; 6] = [1, 5, 10, 30, 60, 600];
+pub const WINDOWS: [u16; 8] = [1, 5, 10, 30, 60, 600, 3600, 0];
+
+pub fn window_label(seconds: u16, lang: Language) -> String {
+    match seconds {
+        0 => lang.pick("全部", "All").to_owned(),
+        60 => lang.pick("1 分钟", "1 min").to_owned(),
+        600 => lang.pick("10 分钟", "10 min").to_owned(),
+        3600 => lang.pick("1 小时", "1 h").to_owned(),
+        _ => match lang {
+            Language::Chinese => format!("{seconds} 秒"),
+            Language::English => format!("{seconds} s"),
+        },
+    }
+}
 
 pub struct Settings {
     pub language: Language,
@@ -101,5 +114,7 @@ mod tests {
         assert!(matches!(settings.language, Language::English));
         assert!(!settings.dark_mode);
         assert_eq!(settings.window_secs, 30);
+        assert_eq!(Settings::parse("window_secs=0\n").window_secs, 0);
+        assert_eq!(Settings::parse("window_secs=3600\n").window_secs, 3600);
     }
 }

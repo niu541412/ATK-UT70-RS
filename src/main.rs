@@ -1,6 +1,7 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod firmware;
+mod history;
 mod i18n;
 mod protocol;
 mod settings;
@@ -8,6 +9,7 @@ mod worker;
 
 use eframe::egui;
 use egui_plot::{CoordinatesFormatter, Corner, Legend, Line, Plot};
+use history::{History, PlotSample};
 use i18n::{Language, Message};
 use settings::Settings;
 use std::collections::{BTreeMap, VecDeque};
@@ -15,7 +17,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
-use worker::{Command, Event, TimedSample};
+use worker::{Command, Event};
 
 struct IconTextures {
     plugs: egui::TextureHandle,
@@ -93,6 +95,7 @@ fn configure_fonts(ctx: &egui::Context) {
 }
 
 #[derive(Clone, Copy)]
+#[repr(usize)]
 enum Metric {
     Voltage,
     Current,
@@ -100,17 +103,25 @@ enum Metric {
     Dp,
     Dm,
     Resistance,
+    Charge,
+    Energy,
 }
 
 impl Metric {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 8] = [
         Self::Voltage,
         Self::Current,
         Self::Power,
         Self::Dp,
         Self::Dm,
         Self::Resistance,
+        Self::Charge,
+        Self::Energy,
     ];
+
+    fn accumulated(self) -> bool {
+        matches!(self, Self::Charge | Self::Energy)
+    }
 
     fn title(self, lang: Language) -> &'static str {
         match self {
@@ -120,6 +131,8 @@ impl Metric {
             Self::Dp => "D+ V",
             Self::Dm => "D− V",
             Self::Resistance => lang.pick("负载电阻 Ω", "Load resistance Ω"),
+            Self::Charge => lang.pick("累计电量 mAh", "Charge mAh"),
+            Self::Energy => lang.pick("累计能量 Wh", "Energy Wh"),
         }
     }
 
@@ -131,6 +144,8 @@ impl Metric {
             Self::Dp => egui::Color32::from_rgb(70, 190, 235),
             Self::Dm => egui::Color32::from_rgb(240, 160, 65),
             Self::Resistance => egui::Color32::from_rgb(232, 236, 241),
+            Self::Charge => egui::Color32::from_rgb(255, 170, 178),
+            Self::Energy => egui::Color32::from_rgb(215, 175, 250),
         }
     }
 
@@ -145,10 +160,13 @@ impl Metric {
             Self::Dp => egui::Color32::from_rgb(25, 111, 169),
             Self::Dm => egui::Color32::from_rgb(167, 91, 15),
             Self::Resistance => egui::Color32::BLACK,
+            Self::Charge => egui::Color32::from_rgb(172, 78, 92),
+            Self::Energy => egui::Color32::from_rgb(132, 91, 178),
         }
     }
 
-    fn value(self, sample: &protocol::Sample) -> Option<f64> {
+    fn value(self, point: &PlotSample) -> Option<f64> {
+        let sample = &point.sample;
         let value = match self {
             Self::Voltage => sample.voltage as f64,
             Self::Current => sample.current as f64,
@@ -157,6 +175,8 @@ impl Metric {
             Self::Dm => sample.dm as f64,
             Self::Resistance if sample.current > 0.001 => (sample.voltage / sample.current) as f64,
             Self::Resistance => return None,
+            Self::Charge => point.amp_hours * 1000.0,
+            Self::Energy => point.watt_hours,
         };
         value.is_finite().then_some(value)
     }
@@ -167,8 +187,8 @@ struct App {
     commands: Sender<Command>,
     events: Receiver<Event>,
     icons: IconTextures,
-    samples: VecDeque<TimedSample>,
-    chart_origin: Option<f64>,
+    history: History,
+    frozen_history: Option<History>,
     paused: bool,
     window_secs: u16,
     cursor_values: bool,
@@ -194,7 +214,7 @@ struct App {
     scanning_protocols: bool,
     protocol_results: BTreeMap<u8, ProtocolResult>,
     logs: VecDeque<(String, Message)>,
-    trace_visible: [bool; 6],
+    trace_visible: [bool; 8],
 }
 
 #[derive(Default)]
@@ -222,8 +242,8 @@ impl App {
             commands: command_tx,
             events: event_rx,
             icons: IconTextures::new(ctx),
-            samples: VecDeque::new(),
-            chart_origin: None,
+            history: History::default(),
+            frozen_history: None,
             paused: false,
             window_secs: settings.window_secs,
             cursor_values: settings.cursor_values,
@@ -252,7 +272,7 @@ impl App {
                 Self::local_time(),
                 Message::new("正在连接 UT70…", "Connecting to UT70…"),
             )]),
-            trace_visible: [true, true, false, false, false, false],
+            trace_visible: [true, true, false, false, false, false, false, false],
         }
     }
 
@@ -264,8 +284,8 @@ impl App {
                     self.status = message;
                 }
                 Event::Connected(version, rate, rate_confirmed) => {
-                    self.samples.clear();
-                    self.chart_origin = None;
+                    self.history.clear();
+                    self.frozen_history = None;
                     self.paused = false;
                     self.protocol_results.clear();
                     self.scanning_protocols = false;
@@ -300,8 +320,8 @@ impl App {
                     self.connecting = false;
                     self.connected = false;
                     self.bootloader = true;
-                    self.samples.clear();
-                    self.chart_origin = None;
+                    self.history.clear();
+                    self.frozen_history = None;
                     self.paused = false;
                     self.flash_confirmed = false;
                     self.version = Some(version);
@@ -320,8 +340,8 @@ impl App {
                     self.connected = false;
                     self.bootloader = false;
                     self.version = None;
-                    self.samples.clear();
-                    self.chart_origin = None;
+                    self.history.clear();
+                    self.frozen_history = None;
                     self.paused = false;
                     self.flash_confirmed = false;
                     self.status = Message::new("已断开设备", "Meter disconnected");
@@ -389,22 +409,8 @@ impl App {
                     self.log(self.status.clone());
                 }
                 Event::Samples(batch) => {
-                    if self.paused {
-                        continue;
-                    }
-                    if self.chart_origin.is_none() {
-                        self.chart_origin = batch.first().map(|item| item.seconds);
-                    }
-                    self.samples.extend(batch);
-                    if let Some(last) = self.samples.back() {
-                        let threshold = last.seconds - 600.0;
-                        while self
-                            .samples
-                            .front()
-                            .is_some_and(|first| first.seconds < threshold)
-                        {
-                            self.samples.pop_front();
-                        }
+                    for point in batch {
+                        self.history.push(point, self.rate);
                     }
                 }
                 Event::Recording(value) => {
@@ -459,13 +465,17 @@ impl App {
     }
 
     fn restart_measurement(&mut self) {
-        self.samples.clear();
-        self.chart_origin = None;
+        self.history.clear();
+        self.frozen_history = None;
         self.paused = false;
         self.log(Message::new(
-            "曲线已重新开始；CSV 记录不受影响",
-            "Chart restarted; CSV recording continues",
+            "曲线与累计电量、能量已重新开始；CSV 记录继续",
+            "Chart, charge and energy restarted; CSV recording continues",
         ));
+    }
+
+    fn shown_history(&self) -> &History {
+        self.frozen_history.as_ref().unwrap_or(&self.history)
     }
 
     fn set_protocol_panel(&mut self, ctx: &egui::Context, open: bool) {
@@ -503,83 +513,28 @@ impl App {
     }
 
     fn latest(&self) -> Option<protocol::Sample> {
-        self.samples.back().map(|item| item.sample)
+        self.shown_history().latest().map(|item| item.sample)
     }
 
     fn ripple_vpp_mv(&self) -> Option<f64> {
         if !self.connected {
             return None;
         }
-        ripple_vpp_mv(&self.samples)
+        ripple_vpp_mv(self.shown_history().raw())
     }
 
     fn chart_points(&self, metric: Metric) -> Vec<[f64; 2]> {
-        // 每条曲线最多绘制约 2000 个点；CSV 仍记录收到的全部测量点。
-        let Some(last) = self.samples.back() else {
+        let history = self.shown_history();
+        let Some(last) = history.latest() else {
             return Vec::new();
         };
-        let start = lower_bound_time(&self.samples, last.seconds - self.window_secs as f64);
-        let width = (self.samples.len() - start).div_ceil(1000).max(1);
-        let mut out = Vec::with_capacity((self.samples.len() - start).min(2000));
-        let origin = self.chart_origin.unwrap_or(0.0);
-        if let Some((item, value)) = self
-            .samples
-            .range(start..)
-            .find_map(|item| metric.value(&item.sample).map(|value| (item, value)))
-        {
-            out.push([item.seconds - origin, value]);
-        }
-        for index in (start..self.samples.len()).step_by(width) {
-            let bucket = self
-                .samples
-                .range(index..(index + width).min(self.samples.len()));
-            let mut valid =
-                bucket.filter_map(|item| metric.value(&item.sample).map(|value| (item, value)));
-            let Some((mut low, mut low_value)) = valid.next() else {
-                continue;
-            };
-            let mut high = low;
-            let mut high_value = low_value;
-            for (item, value) in valid {
-                if value < low_value {
-                    low = item;
-                    low_value = value;
-                }
-                if value > high_value {
-                    high = item;
-                    high_value = value;
-                }
-            }
-            let first = if low.seconds <= high.seconds {
-                low
-            } else {
-                high
-            };
-            let second = if low.seconds <= high.seconds {
-                high
-            } else {
-                low
-            };
-            out.push([first.seconds - origin, metric.value(&first.sample).unwrap()]);
-            if first.seconds != second.seconds {
-                out.push([
-                    second.seconds - origin,
-                    metric.value(&second.sample).unwrap(),
-                ]);
-            }
-        }
-        if let Some((item, value)) = self
-            .samples
-            .iter()
-            .rev()
-            .find_map(|item| metric.value(&item.sample).map(|value| (item, value)))
-        {
-            let point = [item.seconds - origin, value];
-            if out.last().is_none_or(|previous| previous[0] < point[0]) {
-                out.push(point);
-            }
-        }
-        out
+        let start = if self.window_secs == 0 {
+            history.origin().unwrap_or(last.seconds)
+        } else {
+            (last.seconds - f64::from(self.window_secs))
+                .max(history.origin().unwrap_or(last.seconds))
+        };
+        history.chart_points(metric, start, last.seconds)
     }
 
     fn header(&mut self, ui: &mut egui::Ui) {
@@ -699,8 +654,6 @@ impl App {
                 }
             });
         });
-        ui.add(egui::Label::new(self.status.text(lang)).truncate())
-            .on_hover_text(self.status.text(lang));
         let total_width = ui.available_width();
         let controls_width = (total_width * 0.58).max(440.0).min(total_width - 260.0);
         let log_width = total_width - controls_width - 8.0;
@@ -741,6 +694,7 @@ impl App {
                             .clicked()
                         {
                             self.paused = !self.paused;
+                            self.frozen_history = self.paused.then(|| self.history.clone());
                             self.log(if self.paused {
                                 Message::new("显示已暂停", "Display paused")
                             } else {
@@ -819,7 +773,16 @@ impl App {
                                                 lang.pick(zh, en),
                                             );
                                         }
-                                        ui.label(lang.pick("其他", "Other"));
+                                        let is_other = !protocol::SCREENS
+                                            .iter()
+                                            .any(|(id, _, _)| *id == self.screen);
+                                        ui.add_enabled(
+                                            false,
+                                            egui::Button::selectable(
+                                                is_other,
+                                                lang.pick("其他", "Other"),
+                                            ),
+                                        );
                                     });
                             },
                         );
@@ -912,8 +875,15 @@ impl App {
                     .show(ui, |ui| {
                         for (clock, message) in &self.logs {
                             ui.add(
-                                egui::Label::new(format!("{} {}", clock, message.text(lang)))
-                                    .truncate(),
+                                egui::Label::new(
+                                    egui::RichText::new(format!(
+                                        "{} {}",
+                                        clock,
+                                        message.text(lang)
+                                    ))
+                                    .monospace(),
+                                )
+                                .truncate(),
                             )
                             .on_hover_text(message.text(lang));
                         }
@@ -962,7 +932,7 @@ impl App {
         if let Some(hint) = hint {
             label_response.on_hover_text(hint);
         }
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(78.0, 18.0), egui::Sense::hover());
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(90.0, 18.0), egui::Sense::hover());
         ui.painter().text(
             rect.right_center(),
             egui::Align2::RIGHT_CENTER,
@@ -971,15 +941,25 @@ impl App {
             color,
         );
         ui.colored_label(color, unit);
-        ui.end_row();
     }
 
     fn readings(&self, ui: &mut egui::Ui) {
         let lang = self.language;
         let latest = self.latest();
-        let info_width = (ui.available_width() * 0.26).clamp(205.0, 255.0);
-        let cards_width = ui.available_width() - info_width - 8.0;
-        ui.horizontal(|ui| {
+        let total_width = ui.available_width();
+        let side_by_side = total_width >= 840.0;
+        let info_width = (total_width * 0.44).clamp(400.0, 450.0).min(total_width);
+        let cards_width = if side_by_side {
+            total_width - info_width - 8.0
+        } else {
+            total_width
+        };
+        let layout = if side_by_side {
+            egui::Layout::left_to_right(egui::Align::Min)
+        } else {
+            egui::Layout::top_down(egui::Align::Min)
+        };
+        ui.with_layout(layout, |ui| {
             ui.allocate_ui_with_layout(
                 egui::vec2(cards_width, 94.0),
                 egui::Layout::top_down(egui::Align::Min),
@@ -1029,8 +1009,9 @@ impl App {
                                     (sample.current > 0.001)
                                         .then(|| format!("{:.1}", sample.voltage / sample.current))
                                 });
+                                let (amp_hours, watt_hours) = self.shown_history().totals();
                                 egui::Grid::new("secondary_readings")
-                                    .num_columns(3)
+                                    .num_columns(6)
                                     .spacing(egui::vec2(4.0, 1.0))
                                     .show(ui, |ui| {
                                         let dp_color =
@@ -1053,6 +1034,7 @@ impl App {
                                             dm_color,
                                             None,
                                         );
+                                        ui.end_row();
                                         Self::secondary_reading_row(
                                             ui,
                                             lang.pick("负载电阻", "Load R"),
@@ -1077,6 +1059,28 @@ impl App {
                                                 "Peak-to-peak voltage from the latest 1 second of samples. The meter tops out at 1000 SPS, so high-frequency switching ripple from chargers may be missed and the reading may differ greatly from the actual ripple. For reference only.",
                                             )),
                                         );
+                                        ui.end_row();
+                                        Self::secondary_reading_row(
+                                            ui,
+                                            lang.pick("累计电量", "Charge"),
+                                            latest.map_or("—".into(), |_| {
+                                                format!("{:.4}", amp_hours * 1000.0)
+                                            }),
+                                            "mAh",
+                                            Metric::Charge.label_color(ui.visuals().dark_mode),
+                                            None,
+                                        );
+                                        Self::secondary_reading_row(
+                                            ui,
+                                            lang.pick("累计能量", "Energy"),
+                                            latest.map_or("—".into(), |_| {
+                                                format!("{watt_hours:.5}")
+                                            }),
+                                            "Wh",
+                                            Metric::Energy.label_color(ui.visuals().dark_mode),
+                                            None,
+                                        );
+                                        ui.end_row();
                                     });
                             });
                         });
@@ -1098,34 +1102,45 @@ impl App {
         });
         let visible = self.trace_visible;
         let dark_mode = ui.visuals().dark_mode;
-        let plot_height = (ui.available_height() - 8.0).max(150.0);
+        let available_height = (ui.available_height() - 8.0).max(240.0);
+        let history = self.shown_history();
+        let origin = history.origin().unwrap_or(0.0);
+        let end = history.latest().map_or(0.1, |last| last.seconds - origin);
+        let start = if self.window_secs == 0 {
+            0.0
+        } else {
+            (end - f64::from(self.window_secs)).max(0.0)
+        };
+        let short_window = self.window_secs != 0 && self.window_secs <= 60;
         let mut plot = Plot::new("measurements_plot")
             .width(ui.available_width())
-            .height(plot_height)
+            .height(available_height)
             .legend(Legend::default())
             .x_axis_label(lang.pick("秒", "Seconds"))
             .y_axis_label(lang.pick("数值", "Value"))
+            .include_y(0.0)
             .set_margin_fraction(egui::vec2(0.0, 0.05))
             .allow_drag(false)
             .allow_zoom(false)
             .allow_scroll(false)
             .show_crosshair(self.cursor_values);
         if self.cursor_values {
-            let samples = &self.samples;
-            let origin = self.chart_origin.unwrap_or(0.0);
             plot = plot.coordinates_formatter(
                 Corner::LeftTop,
                 CoordinatesFormatter::new(move |point, _| {
-                    let Some(item) = closest_sample(samples, point.x + origin) else {
+                    let Some(item) = history.closest(point.x + origin, short_window) else {
                         return String::new();
                     };
-                    let mut text = format!("{:.3} s", item.seconds - origin);
+                    let prefix = if short_window { "" } else { "≈ " };
+                    let mut text = format!("{prefix}{:.3} s", item.seconds - origin);
                     for (index, metric) in Metric::ALL.iter().enumerate() {
                         if visible[index] {
-                            if let Some(value) = metric.value(&item.sample) {
+                            if let Some(value) = metric.value(&item) {
                                 let decimals = match metric {
                                     Metric::Dp | Metric::Dm => 4,
                                     Metric::Resistance => 1,
+                                    Metric::Charge => 4,
+                                    Metric::Energy => 5,
                                     _ => 3,
                                 };
                                 text.push_str(&format!(
@@ -1139,15 +1154,22 @@ impl App {
                 }),
             );
         }
-        let end = self
-            .samples
-            .back()
-            .map_or(0.1, |last| last.seconds - self.chart_origin.unwrap_or(0.0));
-        let start = (end - self.window_secs as f64).max(0.0);
         let response = plot.show(ui, |plot| {
             plot.set_plot_bounds_x(start..=end.max(start + 0.1));
             for (index, metric) in Metric::ALL.iter().enumerate() {
-                if visible[index] {
+                if visible[index] && metric.accumulated() {
+                    plot.line(
+                        Line::new(metric.title(lang), self.chart_points(*metric))
+                            .color(metric.label_color(dark_mode))
+                            .width(0.0)
+                            .fill(0.0)
+                            .fill_alpha(0.15)
+                            .allow_band(false),
+                    );
+                }
+            }
+            for (index, metric) in Metric::ALL.iter().enumerate() {
+                if visible[index] && !metric.accumulated() {
                     plot.line(
                         Line::new(metric.title(lang), self.chart_points(*metric))
                             .color(metric.label_color(dark_mode))
@@ -1440,14 +1462,14 @@ impl eframe::App for App {
                     ui.horizontal(|ui| {
                         ui.label(self.language.pick("横轴时间范围", "Time range"));
                         egui::ComboBox::from_id_salt("time_window")
-                            .selected_text(format!("{} s", self.window_secs))
+                            .selected_text(settings::window_label(self.window_secs, self.language))
                             .show_ui(ui, |ui| {
                                 for seconds in settings::WINDOWS {
                                     changed |= ui
                                         .selectable_value(
                                             &mut self.window_secs,
                                             seconds,
-                                            format!("{seconds} s"),
+                                            settings::window_label(seconds, self.language),
                                         )
                                         .changed();
                                 }
@@ -1538,37 +1560,8 @@ impl eframe::App for App {
     }
 }
 
-fn lower_bound_time(samples: &VecDeque<TimedSample>, seconds: f64) -> usize {
-    let (mut left, mut right) = (0, samples.len());
-    while left < right {
-        let middle = left + (right - left) / 2;
-        if samples[middle].seconds < seconds {
-            left = middle + 1;
-        } else {
-            right = middle;
-        }
-    }
-    left
-}
-
-fn closest_sample(samples: &VecDeque<TimedSample>, seconds: f64) -> Option<&TimedSample> {
-    let next = lower_bound_time(samples, seconds);
-    match (next.checked_sub(1), samples.get(next)) {
-        (Some(previous), Some(after)) => {
-            let before = &samples[previous];
-            if (seconds - before.seconds).abs() <= (after.seconds - seconds).abs() {
-                Some(before)
-            } else {
-                Some(after)
-            }
-        }
-        (Some(previous), None) => samples.get(previous),
-        (None, after) => after,
-    }
-}
-
 // 最近 1 秒电压采样的峰峰值，仅供参考，并非仪表模拟带宽内的完整纹波测量。
-fn ripple_vpp_mv(samples: &VecDeque<TimedSample>) -> Option<f64> {
+fn ripple_vpp_mv(samples: &VecDeque<PlotSample>) -> Option<f64> {
     let end = samples.back()?.seconds;
     let mut minimum = f64::INFINITY;
     let mut maximum = f64::NEG_INFINITY;
@@ -1596,7 +1589,7 @@ mod ripple_tests {
     fn uses_only_the_latest_second_of_voltage_samples() {
         let mut samples = VecDeque::new();
         for (seconds, voltage) in [(0.0, 10.0), (1.0, 5.0), (1.5, 5.02), (2.0, 4.99)] {
-            samples.push_back(TimedSample {
+            samples.push_back(PlotSample {
                 seconds,
                 sample: protocol::Sample {
                     voltage,
@@ -1604,11 +1597,11 @@ mod ripple_tests {
                     dp: 0.0,
                     dm: 0.0,
                 },
+                amp_hours: 0.0,
+                watt_hours: 0.0,
             });
         }
         assert!((ripple_vpp_mv(&samples).unwrap() - 30.0).abs() < 0.01);
-        assert_eq!(lower_bound_time(&samples, 1.25), 2);
-        assert_eq!(closest_sample(&samples, 1.4).unwrap().seconds, 1.5);
         samples.truncate(1);
         assert_eq!(ripple_vpp_mv(&samples), None);
     }
