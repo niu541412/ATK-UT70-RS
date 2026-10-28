@@ -8,7 +8,7 @@ mod settings;
 mod worker;
 
 use eframe::egui;
-use egui_plot::{CoordinatesFormatter, Corner, Legend, Line, Plot};
+use egui_plot::{AxisHints, CoordinatesFormatter, Corner, HPlacement, Legend, Line, Plot};
 use history::{History, PlotSample};
 use i18n::{Language, Message};
 use settings::Settings;
@@ -123,6 +123,26 @@ impl Metric {
         matches!(self, Self::Charge | Self::Energy)
     }
 
+    fn unit(self) -> &'static str {
+        match self {
+            Self::Voltage | Self::Dp | Self::Dm => "V",
+            Self::Current => "A",
+            Self::Power => "W",
+            Self::Resistance => "Ω",
+            Self::Charge => "mAh",
+            Self::Energy => "Wh",
+        }
+    }
+
+    fn minimum_span(self) -> f64 {
+        match self {
+            Self::Voltage | Self::Dp | Self::Dm => 0.02,
+            Self::Current | Self::Charge | Self::Energy => 0.001,
+            Self::Power => 0.01,
+            Self::Resistance => 0.1,
+        }
+    }
+
     fn title(self, lang: Language) -> &'static str {
         match self {
             Self::Voltage => lang.pick("电压 V", "Voltage V"),
@@ -144,13 +164,13 @@ impl Metric {
             Self::Dp => egui::Color32::from_rgb(70, 190, 235),
             Self::Dm => egui::Color32::from_rgb(240, 160, 65),
             Self::Resistance => egui::Color32::from_rgb(232, 236, 241),
-            Self::Charge => egui::Color32::from_rgb(255, 170, 178),
-            Self::Energy => egui::Color32::from_rgb(215, 175, 250),
+            Self::Charge => egui::Color32::from_rgb(0xFF, 0x00, 0xFF),
+            Self::Energy => egui::Color32::from_rgb(0x00, 0x99, 0xFF),
         }
     }
 
     fn label_color(self, dark_mode: bool) -> egui::Color32 {
-        if dark_mode {
+        if dark_mode || self.accumulated() {
             return self.color();
         }
         match self {
@@ -160,8 +180,7 @@ impl Metric {
             Self::Dp => egui::Color32::from_rgb(25, 111, 169),
             Self::Dm => egui::Color32::from_rgb(167, 91, 15),
             Self::Resistance => egui::Color32::BLACK,
-            Self::Charge => egui::Color32::from_rgb(172, 78, 92),
-            Self::Energy => egui::Color32::from_rgb(132, 91, 178),
+            Self::Charge | Self::Energy => self.color(),
         }
     }
 
@@ -180,6 +199,135 @@ impl Metric {
         };
         value.is_finite().then_some(value)
     }
+}
+
+#[derive(Clone, Copy)]
+struct AxisScale {
+    min: f64,
+    max: f64,
+}
+
+impl AxisScale {
+    fn from_points(metric: Metric, points: &[[f64; 2]]) -> Self {
+        let (mut min, mut max) = points
+            .iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(min, max), point| {
+                (min.min(point[1]), max.max(point[1]))
+            });
+        if !min.is_finite() || !max.is_finite() {
+            return Self {
+                min: 0.0,
+                max: metric.minimum_span(),
+            };
+        }
+        if metric.accumulated() {
+            min = min.min(0.0);
+            max = max.max(0.0);
+        }
+        let span = max - min;
+        if span <= f64::EPSILON * max.abs().max(min.abs()).max(1.0) {
+            let half = (max.abs() * 0.002).max(metric.minimum_span() / 2.0);
+            if metric.accumulated() {
+                if max <= 0.0 {
+                    min -= half * 2.0;
+                } else {
+                    max += half * 2.0;
+                }
+            } else {
+                min -= half;
+                max += half;
+            }
+        } else if metric.accumulated() {
+            if min < 0.0 {
+                min -= span * 0.05;
+            }
+            if max > 0.0 {
+                max += span * 0.05;
+            }
+        } else {
+            min -= span * 0.05;
+            max += span * 0.05;
+        }
+        min = min.max(0.0);
+        if max <= min {
+            max = min + metric.minimum_span();
+        }
+        Self { min, max }
+    }
+
+    fn to_plot(self, value: f64) -> f64 {
+        (value - self.min) / (self.max - self.min)
+    }
+
+    fn from_plot(self, value: f64) -> f64 {
+        self.min + value * (self.max - self.min)
+    }
+
+    fn tick_decimals(self) -> usize {
+        let tick_step = (self.max - self.min) / 10.0;
+        if tick_step > 0.0 && tick_step.is_finite() {
+            (-tick_step.log10()).ceil().clamp(0.0, 9.0) as usize
+        } else {
+            3
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TimeUnit {
+    Seconds,
+    Minutes,
+    Hours,
+}
+
+impl TimeUnit {
+    fn for_span(seconds: f64) -> Self {
+        if seconds > 3600.0 {
+            Self::Hours
+        } else if seconds > 60.0 {
+            Self::Minutes
+        } else {
+            Self::Seconds
+        }
+    }
+
+    fn factor(self) -> f64 {
+        match self {
+            Self::Seconds => 1.0,
+            Self::Minutes => 60.0,
+            Self::Hours => 3600.0,
+        }
+    }
+
+    fn unit(self) -> &'static str {
+        match self {
+            Self::Seconds => "s",
+            Self::Minutes => "min",
+            Self::Hours => "h",
+        }
+    }
+
+    fn axis_label(self, lang: Language) -> &'static str {
+        match self {
+            Self::Seconds => lang.pick("时间 (秒)", "Time (seconds)"),
+            Self::Minutes => lang.pick("时间 (分钟)", "Time (minutes)"),
+            Self::Hours => lang.pick("时间 (小时)", "Time (hours)"),
+        }
+    }
+}
+
+fn format_axis_value(value: f64, step: f64, unit: &str) -> String {
+    let decimals = if step > 0.0 && step.is_finite() {
+        (-step.log10()).ceil().clamp(0.0, 6.0) as usize
+    } else {
+        3
+    };
+    format!("{value:.decimals$}{unit}")
+}
+
+fn format_fixed_axis_value(value: f64, decimals: usize, unit: &str, number_width: usize) -> String {
+    let number = format!("{value:.decimals$}");
+    format!("{number:>number_width$}{unit}")
 }
 
 struct App {
@@ -1037,6 +1185,27 @@ impl App {
                                         ui.end_row();
                                         Self::secondary_reading_row(
                                             ui,
+                                            lang.pick("累计电量", "Charge"),
+                                            latest.map_or("—".into(), |_| {
+                                                format!("{:.4}", amp_hours * 1000.0)
+                                            }),
+                                            "mAh",
+                                            Metric::Charge.label_color(ui.visuals().dark_mode),
+                                            None,
+                                        );
+                                        Self::secondary_reading_row(
+                                            ui,
+                                            lang.pick("累计能量", "Energy"),
+                                            latest.map_or("—".into(), |_| {
+                                                format!("{watt_hours:.5}")
+                                            }),
+                                            "Wh",
+                                            Metric::Energy.label_color(ui.visuals().dark_mode),
+                                            None,
+                                        );
+                                        ui.end_row();
+                                        Self::secondary_reading_row(
+                                            ui,
                                             lang.pick("负载电阻", "Load R"),
                                             resistance.unwrap_or_else(|| "—".into()),
                                             "Ω",
@@ -1060,27 +1229,6 @@ impl App {
                                             )),
                                         );
                                         ui.end_row();
-                                        Self::secondary_reading_row(
-                                            ui,
-                                            lang.pick("累计电量", "Charge"),
-                                            latest.map_or("—".into(), |_| {
-                                                format!("{:.4}", amp_hours * 1000.0)
-                                            }),
-                                            "mAh",
-                                            Metric::Charge.label_color(ui.visuals().dark_mode),
-                                            None,
-                                        );
-                                        Self::secondary_reading_row(
-                                            ui,
-                                            lang.pick("累计能量", "Energy"),
-                                            latest.map_or("—".into(), |_| {
-                                                format!("{watt_hours:.5}")
-                                            }),
-                                            "Wh",
-                                            Metric::Energy.label_color(ui.visuals().dark_mode),
-                                            None,
-                                        );
-                                        ui.end_row();
                                     });
                             });
                         });
@@ -1093,6 +1241,9 @@ impl App {
         let lang = self.language;
         ui.horizontal_wrapped(|ui| {
             for (index, metric) in Metric::ALL.iter().enumerate() {
+                if matches!(metric, Metric::Resistance) {
+                    continue;
+                }
                 ui.checkbox(
                     &mut self.trace_visible[index],
                     egui::RichText::new(metric.title(lang))
@@ -1100,7 +1251,8 @@ impl App {
                 );
             }
         });
-        let visible = self.trace_visible;
+        let mut visible = self.trace_visible;
+        visible[Metric::Resistance as usize] = false;
         let dark_mode = ui.visuals().dark_mode;
         let available_height = (ui.available_height() - 8.0).max(240.0);
         let history = self.shown_history();
@@ -1112,14 +1264,65 @@ impl App {
             (end - f64::from(self.window_secs)).max(0.0)
         };
         let short_window = self.window_secs != 0 && self.window_secs <= 60;
+        let time_unit = TimeUnit::for_span(end - start);
+        let series: Vec<_> = Metric::ALL
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| visible[*index])
+            .map(|(_, metric)| {
+                let points = self.chart_points(*metric);
+                let scale = AxisScale::from_points(*metric, &points);
+                let scaled_points = points
+                    .into_iter()
+                    .map(|[x, y]| [x, scale.to_plot(y)])
+                    .collect::<Vec<_>>();
+                (*metric, scaled_points, scale)
+            })
+            .collect();
+        let axes = series
+            .iter()
+            .enumerate()
+            .map(|(index, (metric, _, scale))| {
+                let metric = *metric;
+                let scale = *scale;
+                let decimals = scale.tick_decimals();
+                let number_width = format!("{:.decimals$}", scale.max).len();
+                AxisHints::new_y()
+                    .placement(if index == 0 {
+                        HPlacement::Left
+                    } else {
+                        HPlacement::Right
+                    })
+                    .min_thickness(42.0)
+                    .tick_label_font(egui::FontId::monospace(11.0))
+                    .tick_label_color(metric.label_color(dark_mode))
+                    .formatter(move |mark, _| {
+                        format_fixed_axis_value(
+                            scale.from_plot(mark.value).max(0.0),
+                            decimals,
+                            metric.unit(),
+                            number_width,
+                        )
+                    })
+            })
+            .collect();
+        let x_axis = AxisHints::new_x()
+            .label(time_unit.axis_label(lang))
+            .tick_label_font(egui::FontId::monospace(11.0))
+            .formatter(move |mark, _| {
+                format_axis_value(
+                    mark.value / time_unit.factor(),
+                    mark.step_size / time_unit.factor(),
+                    "",
+                )
+            });
         let mut plot = Plot::new("measurements_plot")
             .width(ui.available_width())
             .height(available_height)
             .legend(Legend::default())
-            .x_axis_label(lang.pick("秒", "Seconds"))
-            .y_axis_label(lang.pick("数值", "Value"))
-            .include_y(0.0)
-            .set_margin_fraction(egui::vec2(0.0, 0.05))
+            .custom_x_axes(vec![x_axis])
+            .custom_y_axes(axes)
+            .set_margin_fraction(egui::vec2(0.0, 0.0))
             .allow_drag(false)
             .allow_zoom(false)
             .allow_scroll(false)
@@ -1132,7 +1335,11 @@ impl App {
                         return String::new();
                     };
                     let prefix = if short_window { "" } else { "≈ " };
-                    let mut text = format!("{prefix}{:.3} s", item.seconds - origin);
+                    let mut text = format!(
+                        "{prefix}{:.3} {}",
+                        (item.seconds - origin) / time_unit.factor(),
+                        time_unit.unit(),
+                    );
                     for (index, metric) in Metric::ALL.iter().enumerate() {
                         if visible[index] {
                             if let Some(value) = metric.value(&item) {
@@ -1156,22 +1363,23 @@ impl App {
         }
         let response = plot.show(ui, |plot| {
             plot.set_plot_bounds_x(start..=end.max(start + 0.1));
-            for (index, metric) in Metric::ALL.iter().enumerate() {
-                if visible[index] && metric.accumulated() {
+            plot.set_plot_bounds_y(0.0..=1.0);
+            for (metric, points, scale) in &series {
+                if metric.accumulated() {
                     plot.line(
-                        Line::new(metric.title(lang), self.chart_points(*metric))
+                        Line::new(metric.title(lang), points.clone())
                             .color(metric.label_color(dark_mode))
                             .width(0.0)
-                            .fill(0.0)
+                            .fill(scale.to_plot(0.0) as f32)
                             .fill_alpha(0.15)
                             .allow_band(false),
                     );
                 }
             }
-            for (index, metric) in Metric::ALL.iter().enumerate() {
-                if visible[index] && !metric.accumulated() {
+            for (metric, points, _) in series {
+                if !metric.accumulated() {
                     plot.line(
-                        Line::new(metric.title(lang), self.chart_points(*metric))
+                        Line::new(metric.title(lang), points)
                             .color(metric.label_color(dark_mode))
                             .width(2.0),
                     );
@@ -1604,6 +1812,57 @@ mod ripple_tests {
         assert!((ripple_vpp_mv(&samples).unwrap() - 30.0).abs() < 0.01);
         samples.truncate(1);
         assert_eq!(ripple_vpp_mv(&samples), None);
+    }
+}
+
+#[cfg(test)]
+mod chart_axis_tests {
+    use super::*;
+
+    #[test]
+    fn each_metric_uses_its_own_data_range() {
+        let voltage = AxisScale::from_points(Metric::Voltage, &[[0.0, 5.0], [1.0, 5.1]]);
+        let current = AxisScale::from_points(Metric::Current, &[[0.0, 0.01], [1.0, 0.02]]);
+        assert!(voltage.min < 5.0 && voltage.max > 5.1);
+        assert!(current.min < 0.01 && current.max > 0.02);
+        assert!(voltage.to_plot(5.0) >= 0.0 && voltage.to_plot(5.1) <= 1.0);
+        assert!(current.to_plot(0.01) >= 0.0 && current.to_plot(0.02) <= 1.0);
+        assert!((current.from_plot(current.to_plot(0.015)) - 0.015).abs() < 1e-12);
+
+        let charge = AxisScale::from_points(Metric::Charge, &[[0.0, 2.0], [1.0, 3.0]]);
+        assert_eq!(charge.min, 0.0);
+
+        let zero = AxisScale::from_points(Metric::Current, &[[0.0, 0.0]]);
+        let negative = AxisScale::from_points(Metric::Dm, &[[0.0, -0.1], [1.0, -0.05]]);
+        assert_eq!(zero.min, 0.0);
+        assert_eq!(negative.min, 0.0);
+        assert!(zero.max > 0.0 && negative.max > 0.0);
+    }
+
+    #[test]
+    fn time_units_change_at_one_minute_and_one_hour() {
+        assert!(matches!(TimeUnit::for_span(60.0), TimeUnit::Seconds));
+        assert!(matches!(TimeUnit::for_span(60.1), TimeUnit::Minutes));
+        assert!(matches!(TimeUnit::for_span(3600.0), TimeUnit::Minutes));
+        assert!(matches!(TimeUnit::for_span(3600.1), TimeUnit::Hours));
+    }
+
+    #[test]
+    fn each_y_axis_keeps_trailing_zeroes() {
+        let narrow = AxisScale::from_points(Metric::Voltage, &[[0.0, 5.123], [1.0, 5.124]]);
+        let decimals = narrow.tick_decimals();
+        let width = format!("{:.decimals$}", narrow.max).len();
+        assert!(decimals >= 4);
+        assert_eq!(
+            format_fixed_axis_value(5.12, decimals, "V", width),
+            "5.1200V"
+        );
+        assert_eq!(
+            format_fixed_axis_value(5.123, decimals, "V", width),
+            "5.1230V"
+        );
+        assert_eq!(format_fixed_axis_value(0.0, 3, "mAh", 6), " 0.000mAh");
+        assert_eq!(format_fixed_axis_value(12.0, 3, "mAh", 6), "12.000mAh");
     }
 }
 
