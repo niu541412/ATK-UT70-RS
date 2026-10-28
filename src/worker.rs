@@ -60,8 +60,40 @@ pub struct TimedSample {
     pub sample: protocol::Sample,
 }
 
+#[derive(Default)]
+struct SampleClock {
+    last_seconds: Option<f64>,
+}
+
+impl SampleClock {
+    fn stamp(
+        &mut self,
+        samples: Vec<protocol::Sample>,
+        rate: u16,
+        received_at: f64,
+    ) -> Vec<TimedSample> {
+        let count = samples.len();
+        let interval = 1.0 / f64::from(rate);
+        let first = received_at - (count.saturating_sub(1) as f64) * interval;
+        let first = self
+            .last_seconds
+            .map_or(first, |last| first.max(last + interval));
+        let batch = samples
+            .into_iter()
+            .enumerate()
+            .map(|(index, sample)| TimedSample {
+                seconds: first + index as f64 * interval,
+                sample,
+            })
+            .collect::<Vec<_>>();
+        self.last_seconds = batch.last().map(|sample| sample.seconds);
+        batch
+    }
+}
+
 pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
     let start = Instant::now();
+    let mut sample_clock = SampleClock::default();
     let mut device: Option<HidDevice> = None;
     let mut rate = 4u16;
     let mut csv: Option<BufWriter<File>> = None;
@@ -89,9 +121,17 @@ pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
                     let hid = api
                         .open(protocol::VID, protocol::PID)
                         .map_err(|e| e.to_string())?;
-                    let version =
-                        request(&hid, protocol::VERSION, &[0, 0], 2, &mut rate, start, &tx)
-                            .and_then(|f| protocol::version(&f));
+                    let version = request(
+                        &hid,
+                        protocol::VERSION,
+                        &[0, 0],
+                        2,
+                        &mut rate,
+                        start,
+                        &mut sample_clock,
+                        &tx,
+                    )
+                    .and_then(|f| protocol::version(&f));
                     match version {
                         Ok(v) if v.boot_mode => {
                             let _ = tx.send(Event::Bootloader(v));
@@ -115,6 +155,7 @@ pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
                                 2,
                                 &mut rate,
                                 start,
+                                &mut sample_clock,
                                 &tx,
                             ) {
                                 if let Ok(current) = protocol::rate(&frame) {
@@ -124,9 +165,16 @@ pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
                             }
                             let _ =
                                 tx.send(Event::Connected(maybe_version.ok(), rate, rate_confirmed));
-                            if let Ok(frame) =
-                                request(&hid, protocol::FACE, &[0; 4], 1, &mut rate, start, &tx)
-                            {
+                            if let Ok(frame) = request(
+                                &hid,
+                                protocol::FACE,
+                                &[0; 4],
+                                1,
+                                &mut rate,
+                                start,
+                                &mut sample_clock,
+                                &tx,
+                            ) {
                                 if let Some(screen) = frame.payload.first() {
                                     let _ = tx.send(Event::Screen(*screen));
                                 }
@@ -148,6 +196,7 @@ pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
             }
             Ok(Command::Disconnect) => {
                 device = None;
+                sample_clock = SampleClock::default();
                 scan_deadline = None;
                 scan_last_report = None;
                 if let Some(mut writer) = csv.take() {
@@ -162,8 +211,16 @@ pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
                     .ok_or("device is not connected".to_string())
                     .and_then(|hid| {
                         let payload = protocol::rate_payload(requested)?;
-                        let frame =
-                            request(hid, protocol::FREQUENCY, &payload, 2, &mut rate, start, &tx)?;
+                        let frame = request(
+                            hid,
+                            protocol::FREQUENCY,
+                            &payload,
+                            2,
+                            &mut rate,
+                            start,
+                            &mut sample_clock,
+                            &tx,
+                        )?;
                         protocol::rate(&frame)
                     });
                 match result {
@@ -212,10 +269,19 @@ pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
                             2,
                             &mut rate,
                             start,
+                            &mut sample_clock,
                             &tx,
                         )?;
-                        let frame =
-                            request(hid, protocol::FACE, &[0; 4], 2, &mut rate, start, &tx)?;
+                        let frame = request(
+                            hid,
+                            protocol::FACE,
+                            &[0; 4],
+                            2,
+                            &mut rate,
+                            start,
+                            &mut sample_clock,
+                            &tx,
+                        )?;
                         frame
                             .payload
                             .first()
@@ -345,7 +411,9 @@ pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
                                     }
                                 }
                             }
-                            if let Some(batch) = process_sample_report(&buf[..n], rate, start) {
+                            if let Some(batch) =
+                                process_sample_report(&buf[..n], rate, start, &mut sample_clock)
+                            {
                                 if let Some(writer) = csv.as_mut() {
                                     if let Err(e) = write_csv(writer, &batch) {
                                         csv = None;
@@ -373,6 +441,7 @@ pub fn run(rx: Receiver<Command>, tx: Sender<Event>) {
                         }
                         Err(e) => {
                             device = None;
+                            sample_clock = SampleClock::default();
                             scan_deadline = None;
                             scan_last_report = None;
                             if let Some(mut writer) = csv.take() {
@@ -412,24 +481,19 @@ fn write_csv(writer: &mut BufWriter<File>, batch: &[TimedSample]) -> std::io::Re
     Ok(())
 }
 
-fn process_sample_report(report: &[u8], rate: u16, start: Instant) -> Option<Vec<TimedSample>> {
+fn process_sample_report(
+    report: &[u8],
+    rate: u16,
+    start: Instant,
+    sample_clock: &mut SampleClock,
+) -> Option<Vec<TimedSample>> {
     let frame = protocol::decode(report, None).ok()?;
     if frame.command != protocol::CV_DATA {
         return None;
     }
     let points = protocol::samples(&frame, rate).ok()?;
-    let count = points.len();
     let now = start.elapsed().as_secs_f64();
-    Some(
-        points
-            .into_iter()
-            .enumerate()
-            .map(|(i, sample)| TimedSample {
-                seconds: now - (count - 1 - i) as f64 / rate as f64,
-                sample,
-            })
-            .collect(),
-    )
+    Some(sample_clock.stamp(points, rate, now))
 }
 
 fn observe_control_frame(frame: &protocol::Frame, rate: &mut u16, tx: &Sender<Event>) {
@@ -458,6 +522,7 @@ fn request(
     timeout_secs: u64,
     rate: &mut u16,
     start: Instant,
+    sample_clock: &mut SampleClock,
     tx: &Sender<Event>,
 ) -> Result<protocol::Frame, String> {
     let report = protocol::encode(command, payload)?;
@@ -476,7 +541,7 @@ fn request(
             }
             observe_control_frame(&frame, rate, tx);
             if frame.command == protocol::CV_DATA {
-                if let Some(batch) = process_sample_report(&buf[..n], *rate, start) {
+                if let Some(batch) = process_sample_report(&buf[..n], *rate, start, sample_clock) {
                     let _ = tx.send(Event::Samples(batch));
                 }
             }
@@ -531,6 +596,7 @@ fn flash(
     start: Instant,
 ) -> Result<protocol::VersionInfo, String> {
     let mut rate = 4;
+    let mut sample_clock = SampleClock::default();
     let fw = firmware::Firmware::read(path)?;
     let api = HidApi::new().map_err(|e| e.to_string())?;
     let hid = api
@@ -543,6 +609,7 @@ fn flash(
         2,
         &mut rate,
         start,
+        &mut sample_clock,
         tx,
     )?)?;
     if !mode.boot_mode {
@@ -594,9 +661,16 @@ fn flash(
     while Instant::now() < deadline {
         if let Ok(api) = HidApi::new() {
             if let Ok(device) = api.open(protocol::VID, protocol::PID) {
-                if let Ok(frame) =
-                    request(&device, protocol::VERSION, &[0, 0], 2, &mut rate, start, tx)
-                {
+                if let Ok(frame) = request(
+                    &device,
+                    protocol::VERSION,
+                    &[0, 0],
+                    2,
+                    &mut rate,
+                    start,
+                    &mut sample_clock,
+                    tx,
+                ) {
                     if let Ok(version) = protocol::version(&frame) {
                         if !version.boot_mode {
                             if version.application as u16 != fw.application {
@@ -617,6 +691,24 @@ fn flash(
 mod tests {
     use super::*;
     use std::sync::mpsc;
+
+    #[test]
+    fn bursty_high_rate_reports_keep_strictly_increasing_timestamps() {
+        let sample = protocol::Sample {
+            voltage: 5.0,
+            current: 1.0,
+            dp: 0.0,
+            dm: 0.0,
+        };
+        let mut clock = SampleClock::default();
+        let first = clock.stamp(vec![sample; 5], 1000, 1.000);
+        let second = clock.stamp(vec![sample; 5], 1000, 1.003);
+        let third = clock.stamp(vec![sample; 5], 1000, 1.020);
+        let all = [first, second, third].concat();
+        assert!(all.windows(2).all(|pair| pair[0].seconds < pair[1].seconds));
+        assert!((all[5].seconds - all[4].seconds - 0.001).abs() < 1e-9);
+        assert!((all.last().unwrap().seconds - 1.020).abs() < 1e-9);
+    }
 
     #[test]
     fn manual_screen_and_rate_reports_update_worker_state() {
