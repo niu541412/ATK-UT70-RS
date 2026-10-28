@@ -244,6 +244,79 @@ impl History {
         points
     }
 
+    pub fn trend_points(
+        &self,
+        metric: Metric,
+        start: f64,
+        end: f64,
+        max_points: usize,
+    ) -> Vec<[f64; 2]> {
+        let Some(origin) = self.origin else {
+            return Vec::new();
+        };
+        if max_points < 3 {
+            return Vec::new();
+        }
+
+        if end - start <= RAW_SECONDS && self.raw.front().is_some_and(|first| first.seconds <= end)
+        {
+            let first = self.raw.partition_point(|point| point.seconds < start);
+            let last = self.raw.partition_point(|point| point.seconds <= end);
+            let count = last.saturating_sub(first);
+            let mut points = Vec::with_capacity(count.min(max_points));
+            if count <= max_points {
+                for sample in self.raw.range(first..last) {
+                    append_sample(&mut points, metric, sample, origin);
+                }
+                return points;
+            }
+
+            append_sample(&mut points, metric, &self.raw[first], origin);
+            let group_count = max_points - 2;
+            let interior_count = count - 2;
+            for group in 0..group_count {
+                let group_start = first + 1 + group * interior_count / group_count;
+                let group_end = first + 1 + (group + 1) * interior_count / group_count;
+                let middle = group_start + (group_end - group_start) / 2;
+                append_sample(&mut points, metric, &self.raw[middle], origin);
+            }
+            append_sample(&mut points, metric, &self.raw[last - 1], origin);
+            return points;
+        }
+
+        let selected: Vec<_> = self
+            .buckets
+            .iter()
+            .filter(|bucket| bucket.last.seconds >= start && bucket.first.seconds <= end)
+            .collect();
+        if selected.is_empty() {
+            return Vec::new();
+        }
+
+        let mut points = Vec::with_capacity(selected.len().min(max_points));
+        append_sample(&mut points, metric, &selected[0].first, origin);
+        if selected.len() <= max_points {
+            for bucket in selected
+                .iter()
+                .skip(1)
+                .take(selected.len().saturating_sub(2))
+            {
+                append_sample(&mut points, metric, &bucket.last, origin);
+            }
+        } else {
+            let group_count = max_points - 2;
+            let interior_count = selected.len() - 2;
+            for group in 0..group_count {
+                let group_start = 1 + group * interior_count / group_count;
+                let group_end = 1 + (group + 1) * interior_count / group_count;
+                let middle = group_start + (group_end - group_start) / 2;
+                append_sample(&mut points, metric, &selected[middle].last, origin);
+            }
+        }
+        append_sample(&mut points, metric, &selected.last().unwrap().last, origin);
+        points
+    }
+
     pub fn closest(&self, seconds: f64, short_window: bool) -> Option<PlotSample> {
         if short_window
             && self

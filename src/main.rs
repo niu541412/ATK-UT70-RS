@@ -685,6 +685,20 @@ impl App {
         history.chart_points(metric, start, last.seconds)
     }
 
+    fn trend_points(&self, metric: Metric, max_points: usize) -> Vec<[f64; 2]> {
+        let history = self.shown_history();
+        let Some(last) = history.latest() else {
+            return Vec::new();
+        };
+        let start = if self.window_secs == 0 {
+            history.origin().unwrap_or(last.seconds)
+        } else {
+            (last.seconds - f64::from(self.window_secs))
+                .max(history.origin().unwrap_or(last.seconds))
+        };
+        history.trend_points(metric, start, last.seconds, max_points)
+    }
+
     fn header(&mut self, ui: &mut egui::Ui) {
         let lang = self.language;
         let settings_icon = self.icons.settings.id();
@@ -1265,13 +1279,20 @@ impl App {
         };
         let short_window = self.window_secs != 0 && self.window_secs <= 60;
         let time_unit = TimeUnit::for_span(end - start);
+        let trend_limit = (ui.available_width() / 3.0).round() as usize;
+        let trend_limit = trend_limit.clamp(120, 400);
         let series: Vec<_> = Metric::ALL
             .iter()
             .enumerate()
             .filter(|(index, _)| visible[*index])
             .map(|(_, metric)| {
-                let points = self.chart_points(*metric);
-                let scale = AxisScale::from_points(*metric, &points);
+                let bounds_points = self.chart_points(*metric);
+                let scale = AxisScale::from_points(*metric, &bounds_points);
+                let points = if matches!(metric, Metric::Voltage | Metric::Current) {
+                    self.trend_points(*metric, trend_limit)
+                } else {
+                    bounds_points
+                };
                 let scaled_points = points
                     .into_iter()
                     .map(|[x, y]| [x, scale.to_plot(y)])
@@ -1863,6 +1884,35 @@ mod chart_axis_tests {
         );
         assert_eq!(format_fixed_axis_value(0.0, 3, "mAh", 6), " 0.000mAh");
         assert_eq!(format_fixed_axis_value(12.0, 3, "mAh", 6), "12.000mAh");
+    }
+
+    #[test]
+    fn trend_plot_points_use_real_samples_and_keep_endpoints() {
+        let mut history = History::default();
+        for index in 0..2000 {
+            history.push(
+                worker::TimedSample {
+                    seconds: index as f64 / 1000.0,
+                    sample: protocol::Sample {
+                        voltage: (index % 2) as f32,
+                        current: 0.0,
+                        dp: 0.0,
+                        dm: 0.0,
+                    },
+                },
+                1000,
+            );
+        }
+        let sampled = history.trend_points(Metric::Voltage, 0.0, 1.999, 300);
+        assert!(sampled.len() <= 300);
+        assert_eq!(sampled.first(), Some(&[0.0, 0.0]));
+        assert_eq!(sampled.last(), Some(&[1.999, 1.0]));
+        assert!(sampled.windows(2).all(|pair| pair[0][0] < pair[1][0]));
+        assert!(
+            sampled
+                .iter()
+                .all(|point| point[1] == 0.0 || point[1] == 1.0)
+        );
     }
 }
 
